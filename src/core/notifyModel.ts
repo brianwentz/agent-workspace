@@ -121,6 +121,35 @@ export interface NewPullRequest {
   url: string;
 }
 
+// Devin Cloud sub-sessions: the top-level session a session belongs to,
+// following `parentOf` (child id -> parent id, from the Cloud session list).
+// An unknown session, or one without a parent, is its own root; a cycle stops
+// at the last session before it repeats.
+export function rootSessionId(
+  sessionId: string,
+  parentOf: (id: string) => string | null | undefined,
+): string {
+  const seen = new Set([sessionId]);
+  let current = sessionId;
+  for (;;) {
+    const parent = parentOf(current);
+    if (!parent || seen.has(parent)) return current;
+    seen.add(parent);
+    current = parent;
+  }
+}
+
+// The tab scopes an auto-opened PR of `sessionId` goes into: the session's own
+// scope, plus its top-level session's when it is a sub-session — so the PR is
+// visible both while working in the sub-session and from the main session.
+export function autoOpenScopes(
+  sessionId: string,
+  parentOf: (id: string) => string | null | undefined,
+): string[] {
+  const root = rootSessionId(sessionId, parentOf);
+  return root === sessionId ? [sessionId] : [sessionId, root];
+}
+
 // F1: PR URLs that appeared on a session between two polls. Only sessions
 // already present in `previous` count — sessions first seen in `next` are a
 // baseline, so the first poll (and the first after a restart, which clears the

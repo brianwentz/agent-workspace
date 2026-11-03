@@ -8,6 +8,7 @@ import {
   ACTIVE_POLL_MS,
   IDLE_POLL_MS,
   archivedScopes,
+  autoOpenScopes,
   backoffMs,
   catchUpPullRequests,
   newPullRequests,
@@ -26,6 +27,7 @@ import { prStore } from './prs';
 import { prTitles } from './prTitles';
 import { handleLink, loadInDevinView, routeContext } from './routing';
 import { claudeSessions } from './claude/sessions';
+import { cloudSessions } from './cloudSessions';
 import { openReviewNotification } from './review/open';
 import { claudeScope } from '../core/tabModel';
 import { state, testMode } from './state';
@@ -405,18 +407,28 @@ class Notifier {
             detail: { count: candidates.length, lastGoodAgeMs: Date.now() - prLedger().lastGoodAt() },
           });
         }
+        // Sub-session PRs also open in the top-level session's scope (the
+        // Cloud list knows the parent links; the v3 list does not).
+        const parents = new Map(
+          cloudSessions()
+            .snapshot()
+            .sessions.map((session) => [session.id, session.parentId] as const),
+        );
         let opened = 0;
         for (const pr of candidates) {
           const decision = route(pr.url, 'shell', 'new-window', routeContext());
           if (decision.kind !== 'gh-tab') continue;
-          state.tabManager.open(pr.url, {
-            background: true,
-            originSessionId: pr.sessionId,
-            lazy: true,
-          });
+          const scopes = autoOpenScopes(pr.sessionId, (id) => parents.get(id));
+          for (const scope of scopes) {
+            state.tabManager.open(pr.url, { background: true, originSessionId: scope, lazy: true });
+          }
           log('shell', 'pr-auto-open', {
             url: pr.url,
-            detail: { sessionId: pr.sessionId, catchUp: baseline },
+            detail: {
+              sessionId: pr.sessionId,
+              catchUp: baseline,
+              ...(scopes.length > 1 ? { rootSessionId: scopes[1] } : {}),
+            },
           });
           opened += 1;
         }

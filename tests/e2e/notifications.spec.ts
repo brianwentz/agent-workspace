@@ -813,6 +813,102 @@ test('auto-opens a lazy background tab in the session scope when a session gains
   }
 });
 
+test('a sub-session PR auto-opens in the sub-session and in its top-level session', async () => {
+  const profile = mkdtempSync(join(tmpdir(), 'agent-workspace-e2e-notify-'));
+  const logFile = join(profile, 'events.jsonl');
+  // The Cloud list carries the parent link (the v3 sessions list does not).
+  const cloudRow = (id: string, parentId: string | null) => ({
+    id,
+    acpId: `devin-${id}`,
+    title: id,
+    url: `${fixtures.devinUrl}/sessions/${id}`,
+    status: 'running',
+    statusEnum: null,
+    userActionRequired: null,
+    folder: null,
+    parentId,
+    isPinned: false,
+    isUnread: false,
+    isStarred: false,
+    directChildrenCount: parentId ? 0 : 1,
+    hasMoreChildren: false,
+    prs: { open: 0, queued: 0, draft: 0, merged: 0, closed: 0 },
+    isArchived: false,
+    updatedAt: 1759800000000,
+  });
+  const cloudFile = join(profile, 'cloud-sessions.json');
+  writeFileSync(
+    cloudFile,
+    JSON.stringify({
+      sessions: [cloudRow('sess-root', null), cloudRow('sess-child', 'sess-root')],
+      folders: [],
+      folderTotals: {},
+      nextCursor: null,
+    }),
+  );
+  const app = await launch(profile, logFile, { AGENT_WORKSPACE_TEST_CLOUD_SESSIONS: cloudFile });
+  const h = hooks(app);
+  const events = async (name: string) => (await readEvents(logFile)).filter((e) => e.event === name);
+  const pollOnce = async () => {
+    const before = (await events('poll')).length;
+    await h.pollNow();
+    await expect.poll(async () => (await events('poll')).length).toBeGreaterThan(before);
+  };
+  const v3 = (id: string, prs: string[]) => ({
+    session_id: id,
+    title: id,
+    status: 'running',
+    status_detail: 'working',
+    updated_at: 3,
+    pull_requests: prs.map((pr_url) => ({ pr_url, pr_state: 'open' })),
+  });
+  const childPr = `${fixtures.githubUrl}/acme/widgets/pull/21`;
+  const rootPr = `${fixtures.githubUrl}/acme/widgets/pull/22`;
+  try {
+    await expect
+      .poll(async () =>
+        app.evaluate(() => ((globalThis as any).__agentworkspace.cloudState().sessions as unknown[]).length),
+      )
+      .toBe(2);
+    fixtures.api.setSessions([v3('sess-root', []), v3('sess-child', [])]);
+    await h.setPat(PAT);
+    await expect.poll(async () => (await state(app)).notifications.lastPollAt).not.toBeNull();
+    await pollOnce();
+
+    // The user is on the top-level session while the sub-session opens a PR.
+    await h.loadDevinUrl(`${fixtures.devinUrl}/sessions/sess-root`);
+    await expect.poll(async () => (await state(app)).tabs.scope).toBe('sess-root');
+    fixtures.api.setSessions([v3('sess-root', []), v3('sess-child', [childPr])]);
+    await pollOnce();
+    await waitForEvent(logFile, 'pr-auto-open');
+    const opened = await events('pr-auto-open');
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.detail).toMatchObject({ sessionId: 'sess-child', rootSessionId: 'sess-root' });
+    // Visible on the top-level session's strip...
+    await expect.poll(async () => (await state(app)).tabs.tabs.map((tab) => tab.url)).toEqual([childPr]);
+    // ...and in the sub-session's own scope.
+    expect(await h.listScopes()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ scope: 'sess-root', count: 1 }),
+        expect.objectContaining({ scope: 'sess-child', count: 1 }),
+      ]),
+    );
+    await h.loadDevinUrl(`${fixtures.devinUrl}/sessions/sess-child`);
+    await expect.poll(async () => (await state(app)).tabs.scope).toBe('sess-child');
+    await expect.poll(async () => (await state(app)).tabs.tabs.map((tab) => tab.url)).toEqual([childPr]);
+
+    // A top-level session's PR stays in that session only.
+    fixtures.api.setSessions([v3('sess-root', [rootPr]), v3('sess-child', [childPr])]);
+    await pollOnce();
+    await expect.poll(async () => (await events('pr-auto-open')).length).toBe(2);
+    expect((await events('pr-auto-open'))[1]?.detail).not.toHaveProperty('rootSessionId');
+    expect((await state(app)).tabs.tabs.map((tab) => tab.url)).toEqual([childPr]);
+    expect(await h.listScopes()).toContainEqual(expect.objectContaining({ scope: 'sess-root', count: 2 }));
+  } finally {
+    await quit(app, profile);
+  }
+});
+
 test('notification panel: badge, banner, open/delete, update entry, restart persistence', async () => {
   const profile = mkdtempSync(join(tmpdir(), 'agent-workspace-e2e-notifcenter-'));
   const logFile = join(profile, 'events.jsonl');
