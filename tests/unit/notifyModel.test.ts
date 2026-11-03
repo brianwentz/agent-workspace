@@ -4,6 +4,8 @@ import {
   ACTIVE_POLL_MS,
   IDLE_POLL_MS,
   archivedScopes,
+  autoOpenScopes,
+  rootSessionId,
   scopeLabel,
   backoffMs,
   catchUpPullRequests,
@@ -366,5 +368,35 @@ describe('catchUpPullRequests', () => {
       session('s2', [{ pr_url: A, pr_state: null }], 1),
     ];
     expect(catchUpPullRequests(sessions, new Set(), opts())).toEqual([{ sessionId: 's1', url: A }]);
+  });
+});
+
+describe('rootSessionId / autoOpenScopes (sub-session PR tabs)', () => {
+  const parents: Record<string, string | null> = { child: 'root', grandchild: 'child', root: null };
+  const parentOf = (id: string) => parents[id];
+
+  it('walks parent links to the top-level session', () => {
+    expect(rootSessionId('grandchild', parentOf)).toBe('root');
+    expect(rootSessionId('child', parentOf)).toBe('root');
+    expect(rootSessionId('root', parentOf)).toBe('root');
+  });
+
+  it('treats a session missing from the Cloud list as its own root', () => {
+    expect(rootSessionId('unknown', parentOf)).toBe('unknown');
+  });
+
+  it('stops on a parent cycle instead of looping', () => {
+    const cyclic: Record<string, string> = { a: 'b', b: 'a' };
+    expect(rootSessionId('a', (id) => cyclic[id])).toBe('b');
+  });
+
+  it('opens a sub-session PR in the sub-session and its top-level session', () => {
+    expect(autoOpenScopes('grandchild', parentOf)).toEqual(['grandchild', 'root']);
+    expect(autoOpenScopes('child', parentOf)).toEqual(['child', 'root']);
+  });
+
+  it('opens a top-level or unknown session PR in that session only', () => {
+    expect(autoOpenScopes('root', parentOf)).toEqual(['root']);
+    expect(autoOpenScopes('unknown', parentOf)).toEqual(['unknown']);
   });
 });
