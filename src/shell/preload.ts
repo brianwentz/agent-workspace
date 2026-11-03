@@ -304,6 +304,7 @@ const api = {
     ipcRenderer.invoke(IpcChannels.favoritesProfiles) as Promise<FavoritesProfilesReply>,
   openFavoritesMenu: (x: number, y: number) =>
     ipcRenderer.invoke(IpcChannels.tabsFavoritesMenu, { x, y }) as Promise<FavoritesMenuReply>,
+  markTabBlank: () => ipcRenderer.send(IpcChannels.tabsMarkBlank),
   reportDropTypes: (types: string[]) => {
     if (Array.isArray(types)) ipcRenderer.send(IpcChannels.tabsDropTypes, { types });
   },

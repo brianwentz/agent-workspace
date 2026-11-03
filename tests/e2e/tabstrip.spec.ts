@@ -325,10 +325,11 @@ const RELOAD_CASES = [
 async function withApp(
   prefix: string,
   body: (app: ElectronApplication, logFile: string) => Promise<void>,
+  extraEnv: Record<string, string> = {},
 ): Promise<void> {
   const profile = mkdtempSync(join(tmpdir(), prefix));
   const logFile = join(profile, 'events.jsonl');
-  const app = await launchApp(profile, logFile, join(profile, 'downloads'), fixtures);
+  const app = await launchApp(profile, logFile, join(profile, 'downloads'), fixtures, extraEnv);
   try {
     await expect.poll(async () => app.evaluate(() => Boolean((globalThis as any).__agentworkspace))).toBe(true);
     await setPaneFraction(app, WIDE_PANE);
@@ -517,4 +518,82 @@ test('a hidden tab reloaded in the background reports loadedHidden on its next a
     const last = (await eventsNamed(logFile, 'tab-activate')).filter((entry) => entry.detail?.id === back).pop()!;
     expect(last.detail!.history).toMatchObject({ loadedHidden: true, shownSinceLoad: false, wasActive: false });
   });
+});
+
+// The page-side and renderer-frame parts every blank-pane snapshot carries.
+function expectSnapshotParts(detail: Record<string, unknown>): void {
+  const page = detail.page as Record<string, unknown>;
+  expect(page).toMatchObject({ visibility: 'visible', readyState: 'complete' });
+  expect(page.elements as number).toBeGreaterThan(0);
+  expect(page.inViewport as number).toBeGreaterThan(0);
+  expect(page.textLength as number).toBeGreaterThan(0);
+  expect(detail.visibility).toBe('visible');
+  expect(typeof detail.pageAt).toBe('number');
+  expect(typeof detail.frameAt).toBe('number');
+  const frame = detail.frame as Record<string, unknown>;
+  expect(frame).toEqual(expect.any(Object));
+  if (!('error' in frame)) {
+    expect(frame.samples as number).toBeGreaterThan(0);
+    expect(frame.topColour).toMatch(/^#[0-9a-f]{6}$/);
+  }
+}
+
+test('the mark-as-blank button snapshots the active tab without re-attaching it', async () => {
+  await withApp('agent-workspace-strip-blank-', async (app, logFile) => {
+    const id = await openTab(app, `${fixtures.githubUrl}/page/blank-a`);
+    await waitForTabTitle(app, 'blank-a');
+    const shell = await shellPage(app);
+    const activationsBefore = (await eventsNamed(logFile, 'tab-activate')).length;
+
+    await shell.click('#tabMarkBlank');
+    await expect(shell.locator('#tabMarkBlank')).toHaveAttribute('data-state', 'marked');
+    await waitForEvent(logFile, 'tab-blank-marked');
+    await expect
+      .poll(async () =>
+        (await eventsNamed(logFile, 'tab-reactivate-diag')).filter((e) => e.detail?.trigger === 'marked-blank').length,
+      )
+      .toBe(1);
+    const marks = await eventsNamed(logFile, 'tab-blank-marked');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.detail).toEqual({ id });
+    const diag = (await eventsNamed(logFile, 'tab-reactivate-diag')).find((e) => e.detail?.trigger === 'marked-blank')!;
+    expect(diag.detail).toMatchObject({ id, attached: true, boundsMatch: true, crashed: false });
+    expectSnapshotParts(diag.detail!);
+    // No re-attach: the user can still click the tab afterwards to see whether that fixes it.
+    expect((await eventsNamed(logFile, 'tab-activate')).length).toBe(activationsBefore);
+    for (const entry of [marks[0]!, diag]) {
+      const line = JSON.stringify(entry);
+      expect(entry.url).toBeUndefined();
+      expect(line).not.toContain('blank-a');
+      expect(line).not.toContain('GitHub fixture');
+    }
+    // The feedback clears by itself.
+    await expect(shell.locator('#tabMarkBlank')).toHaveAttribute('data-state', 'idle', { timeout: 5000 });
+  });
+});
+
+test('the mark-as-blank button is disabled without an active tab', async () => {
+  await withApp('agent-workspace-strip-blank-none-', async (app, logFile) => {
+    const shell = await shellPage(app);
+    await expect(shell.locator('#tabMarkBlank')).toBeDisabled();
+    expect(await eventsNamed(logFile, 'tab-blank-marked')).toHaveLength(0);
+  });
+});
+
+test('an activation logs a throttled tab-paint-baseline of the shown tab', async () => {
+  await withApp(
+    'agent-workspace-strip-baseline-',
+    async (app, logFile) => {
+      const a = await openTab(app, `${fixtures.githubUrl}/page/base-a`);
+      await waitForTabTitle(app, 'base-a');
+      await expect.poll(async () => (await eventsNamed(logFile, 'tab-paint-baseline')).length).toBeGreaterThan(0);
+      const baseline = (await eventsNamed(logFile, 'tab-paint-baseline'))[0]!;
+      expect(baseline.detail).toMatchObject({ trigger: 'baseline', id: a, attached: true, boundsMatch: true });
+      expectSnapshotParts(baseline.detail!);
+      expect(JSON.stringify(baseline)).not.toContain('base-a');
+      // Baselines are their own event: no tab-reactivate-diag from them.
+      expect(await eventsNamed(logFile, 'tab-reactivate-diag')).toHaveLength(0);
+    },
+    { AGENT_WORKSPACE_TEST_BASELINE_MS: '300' },
+  );
 });

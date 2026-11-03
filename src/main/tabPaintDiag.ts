@@ -6,20 +6,32 @@
 // numbers and booleans only — never the URL, title or pixel data.
 import { desktopCapturer, screen, type WebContentsView } from 'electron';
 import {
+  baselineDue,
   captureRect,
+  frameRect,
+  PAGE_METRICS_SCRIPT,
+  parsePageMetrics,
   pixelStats,
   sameRect,
   stackInfo,
+  type PageMetrics,
   type PixelStats,
 } from '../core/tabPaintDiag';
 import { log } from './log';
-import { state } from './state';
+import { state, testMode } from './state';
 
-const VISIBILITY_TIMEOUT_MS = 300;
+const PAGE_TIMEOUT_MS = 300;
+const FRAME_TIMEOUT_MS = 300;
 // The click / reload waits for the snapshot at most this long before running.
 export const DIAG_BUDGET_MS = 1000;
+// Baseline: snapshot the active tab this long after an attach, at most once per interval.
+// Test mode: off unless AGENT_WORKSPACE_TEST_BASELINE_MS is set, which replaces
+// both (quiet test windows are never focused, so the focus gate is skipped there).
+const testBaselineMs = testMode ? Number(process.env.AGENT_WORKSPACE_TEST_BASELINE_MS) : NaN;
+const BASELINE_DELAY_MS = Number.isFinite(testBaselineMs) ? testBaselineMs : 3000;
+const BASELINE_INTERVAL_MS = Number.isFinite(testBaselineMs) ? testBaselineMs : 60_000;
 
-export type DiagTrigger = 'click-active' | 'reload';
+export type DiagTrigger = 'click-active' | 'reload' | 'marked-blank';
 
 let lastWindowFocusAt = 0;
 
@@ -27,15 +39,38 @@ export function noteWindowFocus(): void {
   lastWindowFocusAt = Date.now();
 }
 
-async function pageVisibility(view: WebContentsView): Promise<string> {
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+}
+
+// Numbers from inside the page: an empty document vs a full one that isn't on screen.
+async function pageMetrics(view: WebContentsView): Promise<PageMetrics | { error: string }> {
   try {
-    const result = await Promise.race([
-      view.webContents.executeJavaScript('document.visibilityState', false),
-      new Promise((resolve) => setTimeout(() => resolve('timeout'), VISIBILITY_TIMEOUT_MS)),
-    ]);
-    return typeof result === 'string' ? result : 'other';
+    const raw = await withTimeout<unknown>(
+      view.webContents.executeJavaScript(PAGE_METRICS_SCRIPT, false),
+      PAGE_TIMEOUT_MS,
+      'timeout',
+    );
+    if (raw === 'timeout') return { error: 'timeout' };
+    return parsePageMetrics(raw) ?? { error: 'shape' };
   } catch {
-    return 'error';
+    return { error: 'error' };
+  }
+}
+
+// The renderer's own last frame. Content here while the screen shows none means
+// the frame never reached the screen (compositing/presentation); no content here
+// either means the page painted nothing.
+async function framePixels(view: WebContentsView): Promise<PixelStats | { error: string }> {
+  try {
+    const image = await withTimeout(view.webContents.capturePage(), FRAME_TIMEOUT_MS, null);
+    if (!image) return { error: 'timeout' };
+    if (image.isEmpty()) return { error: 'empty' };
+    const rect = frameRect(view.getBounds(), image.getSize());
+    if (!rect) return { error: 'empty-rect' };
+    return pixelStats(image.crop(rect).toBitmap());
+  } catch (error) {
+    return { error: error instanceof Error ? error.name : 'unknown' };
   }
 }
 
@@ -68,8 +103,10 @@ async function panePixels(view: WebContentsView): Promise<PixelStats | { error: 
   }
 }
 
-// Logs `tab-reactivate-diag` for the active tab. Never rejects.
-export async function diagnoseActiveTab(trigger: DiagTrigger): Promise<void> {
+type DiagEvent = 'tab-reactivate-diag' | 'tab-paint-baseline';
+
+// Snapshots the active tab and logs `event`. Never rejects.
+async function snapshotActiveTab(event: DiagEvent, trigger: DiagTrigger | 'baseline'): Promise<void> {
   const started = Date.now();
   const { windowRef, shellView, tabManager } = state;
   const view = tabManager?.activeView ?? null;
@@ -107,24 +144,71 @@ export async function diagnoseActiveTab(trigger: DiagTrigger): Promise<void> {
       sinceWindowFocusMs: lastWindowFocusAt ? started - lastWindowFocusAt : null,
       surface: state.surface,
     };
-    // Sequential: a screen capture in flight delays the renderer round-trip.
-    const visibility = contents.isDestroyed() ? 'destroyed' : await pageVisibility(view);
+    // Sequential, screen first: it is the closest to what the user saw, and the
+    // page script forces a layout that could change it. *At = ms after `started`
+    // each part began — past DIAG_BUDGET_MS the click / reload has already run.
     const captureStarted = Date.now();
     const pixels = await panePixels(view);
-    log('shell', 'tab-reactivate-diag', {
+    const captureMs = Date.now() - captureStarted;
+    const pageAt = Date.now() - started;
+    const page = contents.isDestroyed() ? { error: 'destroyed' } : await pageMetrics(view);
+    const frameAt = Date.now() - started;
+    const frame = contents.isDestroyed() ? { error: 'destroyed' } : await framePixels(view);
+    const visibility = 'visibility' in page ? page.visibility : page.error;
+    log('shell', event, {
       detail: {
         ...sync,
         visibility,
         pixels,
-        captureMs: Date.now() - captureStarted,
+        captureMs,
+        page,
+        pageAt,
+        frame,
+        frameAt,
         ms: Date.now() - started,
       },
     });
   } catch (error) {
-    log('shell', 'tab-reactivate-diag', {
+    log('shell', event, {
       detail: { trigger, id: tabManager.activeId, error: error instanceof Error ? error.name : 'unknown', ms: Date.now() - started },
     });
   }
+}
+
+// Logs `tab-reactivate-diag` for the active tab. Never rejects.
+export function diagnoseActiveTab(trigger: DiagTrigger): Promise<void> {
+  return snapshotActiveTab('tab-reactivate-diag', trigger);
+}
+
+// The "mark as blank" button: the user says the active tab looks blank right
+// now. Snapshot it as-is — no re-attach, so a click afterwards still shows
+// whether re-attaching fixes it (and logs its own click-active diag).
+export function markActiveTabBlank(): void {
+  const id = state.tabManager?.activeId ?? null;
+  log('shell', 'tab-blank-marked', { detail: { id } });
+  void diagnoseActiveTab('marked-blank');
+}
+
+let baselineTimer: NodeJS.Timeout | null = null;
+let lastBaselineAt = 0;
+
+// After an attach, snapshot the tab a few seconds later as `tab-paint-baseline`
+// (throttled) — the healthy numbers the blank-pane diags are compared against.
+export function scheduleBaseline(tabId: string): void {
+  if (testMode && !Number.isFinite(testBaselineMs)) return;
+  if (baselineTimer) clearTimeout(baselineTimer);
+  baselineTimer = setTimeout(() => {
+    baselineTimer = null;
+    const tabManager = state.tabManager;
+    if (!tabManager || tabManager.activeId !== tabId || !tabManager.activeView) return;
+    if (tabManager.expectedBounds === null) return;
+    if (!testMode && !state.windowRef?.isFocused()) return;
+    const now = Date.now();
+    if (!baselineDue(lastBaselineAt, now, BASELINE_INTERVAL_MS)) return;
+    lastBaselineAt = now;
+    void snapshotActiveTab('tab-paint-baseline', 'baseline');
+  }, BASELINE_DELAY_MS);
+  baselineTimer.unref?.();
 }
 
 // Runs the active-tab diagnostics, then `then` exactly once: when they finish

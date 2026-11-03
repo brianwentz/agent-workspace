@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { captureRect, overlaps, pixelStats, loadStartReset, processGoneDetail, sameRect, stackInfo, tabHistory } from '../../src/core/tabPaintDiag';
+import {
+  baselineDue,
+  captureRect,
+  frameRect,
+  overlaps,
+  PAGE_METRICS_SCRIPT,
+  parsePageMetrics,
+  pixelStats,
+  loadStartReset,
+  processGoneDetail,
+  sameRect,
+  stackInfo,
+  tabHistory,
+} from '../../src/core/tabPaintDiag';
 
 const full = { x: 0, y: 0, width: 1400, height: 900 };
 const devin = { x: 48, y: 36, width: 680, height: 864 };
@@ -188,5 +201,81 @@ describe('loadStartReset', () => {
     [false, false, false],
   ] as const)('attached=%s paneVisible=%s -> shownSinceLoad=%s', (attached, paneVisible, shown) => {
     expect(loadStartReset({ now: 5000, attached, paneVisible })).toEqual({ loadedAt: 5000, shownSinceLoad: shown });
+  });
+});
+
+describe('frameRect', () => {
+  it('insets the captured frame by 16 DIPs at the scale of the frame', () => {
+    expect(frameRect({ width: 600, height: 800 }, { width: 900, height: 1200 })).toEqual({
+      x: 24,
+      y: 24,
+      width: 852,
+      height: 1152,
+    });
+    expect(frameRect({ width: 600, height: 800 }, { width: 600, height: 800 })).toEqual({
+      x: 16,
+      y: 16,
+      width: 568,
+      height: 768,
+    });
+  });
+
+  it('is null for an empty view or image', () => {
+    expect(frameRect({ width: 0, height: 0 }, { width: 600, height: 800 })).toBeNull();
+    expect(frameRect({ width: 600, height: 800 }, { width: 0, height: 0 })).toBeNull();
+    expect(frameRect({ width: 20, height: 20 }, { width: 20, height: 20 })).toBeNull();
+  });
+});
+
+describe('parsePageMetrics', () => {
+  const good = {
+    visibility: 'visible',
+    readyState: 'complete',
+    elements: 1234,
+    inViewport: 321,
+    textLength: 5000,
+    scrollHeight: 4000.4,
+    scrollY: 120,
+    innerWidth: 1209,
+    innerHeight: 1304,
+    devicePixelRatio: 1.25,
+    hasFocus: false,
+  };
+
+  it('keeps known enums and finite numbers', () => {
+    expect(parsePageMetrics(good)).toEqual({ ...good, scrollHeight: 4000.4 });
+  });
+
+  it('never passes a page-controlled string through', () => {
+    const parsed = parsePageMetrics({
+      ...good,
+      visibility: 'secret title',
+      readyState: 'https://example.com/x',
+      elements: 'many',
+      textLength: Number.NaN,
+      hasFocus: 'yes',
+      extra: 'leak',
+    });
+    expect(parsed).toMatchObject({ visibility: 'other', readyState: 'other', elements: -1, textLength: -1, hasFocus: false });
+    expect(JSON.stringify(parsed)).not.toMatch(/secret|example|leak|many/);
+  });
+
+  it('is null for a non-object', () => {
+    expect(parsePageMetrics(null)).toBeNull();
+    expect(parsePageMetrics('x')).toBeNull();
+  });
+
+  it('parses what the page script returns', () => {
+    // The script is plain JS with no free variables beyond the DOM globals.
+    expect(PAGE_METRICS_SCRIPT).toContain('document.visibilityState');
+    expect(() => new Function(`return ${PAGE_METRICS_SCRIPT}`)).not.toThrow();
+  });
+});
+
+describe('baselineDue', () => {
+  it('is due the first time and after the interval', () => {
+    expect(baselineDue(0, 1000, 60_000)).toBe(true);
+    expect(baselineDue(1000, 30_000, 60_000)).toBe(false);
+    expect(baselineDue(1000, 61_000, 60_000)).toBe(true);
   });
 });

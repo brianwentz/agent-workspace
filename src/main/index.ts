@@ -68,7 +68,7 @@ import { notifier } from './notifier';
 import { SecretStore } from './secrets';
 import { requestSettingsFlush } from './settingsFlush';
 import { cancelFolderPrompt } from './folderPrompt';
-import { noteWindowFocus } from './tabPaintDiag';
+import { noteWindowFocus, scheduleBaseline } from './tabPaintDiag';
 import { processGoneDetail } from '../core/tabPaintDiag';
 
 // Windows toasts require an AppUserModelID; match electron-builder's appId.
@@ -449,6 +449,7 @@ async function createWindow(): Promise<void> {
     onBeforeUnload,
     preload: resolve(app.getAppPath(), 'out', 'autofill-preload.cjs'),
     onActiveChanged: closeAutofillOverlaysForInactiveTabs,
+    onAttached: scheduleBaseline,
     initialTabs: saved.tabSnapshot,
     testMode,
     keepAliveMs: keepAliveMs(saved.tabs.keepAliveHours),

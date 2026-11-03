@@ -80,6 +80,7 @@ export const IpcChannels = {
   tabsOpenUserUrl: 'tabs:openUserUrl',
   tabsAddressBar: 'tabs:addressBar',
   tabsDropTypes: 'tabs:dropTypes',
+  tabsMarkBlank: 'tabs:markBlank',
   favoritesProfiles: 'favorites:profiles',
   tabsFavoritesMenu: 'tabs:favoritesMenu',
   navAction: 'nav:action',

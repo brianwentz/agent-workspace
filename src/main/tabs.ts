@@ -82,6 +82,8 @@ export interface TabManagerOptions {
   // Called when the visible/active tab set changed (activate, close, scope
   // switch) — used to dismiss transient overlays like the autofill picker.
   onActiveChanged?: () => void;
+  // Called after a tab's view was (re-)attached as the active view (blank-pane baseline).
+  onAttached?: (tabId: string) => void;
   initialTabs?: unknown;
   testMode: boolean;
   // P8: hidden/non-active tabs keep their webContents live for this long; 0 =
@@ -116,6 +118,7 @@ export class TabManager {
   private readonly onBeforeUnload: TabManagerOptions['onBeforeUnload'];
   private readonly preloadPath: string | undefined;
   private readonly onActiveChanged: (() => void) | undefined;
+  private readonly onAttached: ((tabId: string) => void) | undefined;
   private readonly testMode: boolean;
   private state: TabState;
   private readonly entries = new Map<string, ManagedTab>();
@@ -146,6 +149,7 @@ export class TabManager {
     this.onBeforeUnload = options.onBeforeUnload;
     this.preloadPath = options.preload;
     this.onActiveChanged = options.onActiveChanged;
+    this.onAttached = options.onAttached;
     this.testMode = options.testMode;
     this.keepAliveMs = options.keepAliveMs ?? DEFAULT_KEEPALIVE_MS;
     this.maxLiveTabs = options.maxLiveTabs ?? DEFAULT_MAX_LIVE_TABS;
@@ -683,6 +687,7 @@ export class TabManager {
         this.paneHidden = { id: tabId, at: now };
       }
     }
+    this.onAttached?.(tabId);
   }
 
   activate(tabId: string): void {
