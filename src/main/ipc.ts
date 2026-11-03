@@ -3,7 +3,7 @@ import { guardedHandle, guardedOn } from './ipcGuard';
 import { openFolderDialog } from './dialogs';
 import { clampFraction01 } from '../core/layout';
 import { closeAutofillOverlays } from './autofill';
-import { withReactivateDiag } from './tabPaintDiag';
+import { markActiveTabBlank, withReactivateDiag } from './tabPaintDiag';
 import {
   CredentialDeleteSchema,
   CredentialRevealSchema,
@@ -235,6 +235,10 @@ export function setupIpc(): void {
     // terminal dock) take the same path as the hosted-view shortcut.
     if (open && source === 'shortcut') openAddressBarShortcut(mode ?? 'new');
     else setAddressBar(open, mode ?? 'new', source ?? 'shell');
+  });
+  // "Mark as blank" button: no payload — the active tab is the one diagnosed.
+  guardedOn(IpcChannels.tabsMarkBlank, () => {
+    markActiveTabBlank();
   });
   guardedOn(IpcChannels.tabsDropTypes, (_event, payload: unknown) => {
     if (!debugDrops) return;
