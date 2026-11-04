@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication } from 'playwright';
 import { startFixtureServers, type FixtureServers } from '../fixtures/http';
-import { closeApp, launchWithClaudeFixture, shellPage, waitForEvent } from './helpers';
+import { closeApp, launchWithClaudeFixture, readEvents, shellPage, waitForEvent } from './helpers';
 import type { ClaudeAgent, ClaudeState } from '../../src/shared/ipc';
 
 // §2.5: the Claude terminal tab + background agents end-to-end — fake pty
@@ -224,6 +224,78 @@ test('sidebar "Open in terminal" selects the session and shows the terminal tab'
     expect(action).toBe('open-terminal');
     expect((await h.state()).claudeSessionId).toBe(UB);
     await expect(shell.locator(`[data-session-terminal="${UB}"]`)).toBeAttached({
+      timeout: 10_000,
+    });
+  } finally {
+    await closeApp(app);
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('terminal tab is shown again after leaving and returning to the Claude surface', async () => {
+  const { app, profile } = await launchWithClaudeFixture(fixtures, baseEnv());
+  const h = hooks(app);
+  try {
+    await expect.poll(async () => (await h.claudeState()).status).toBe('ready');
+    await h.setSurface('claude');
+    const shell = await shellPage(app);
+    await h.claudeSelect(UA);
+    await shell.locator('#view-terminal').click();
+    const xterm = shell.locator(`[data-session-terminal="${UA}"] .xterm`);
+    await expect(xterm).toBeVisible({ timeout: 10_000 });
+    const claudePtys = async () =>
+      (await h.terminalList()).filter((t) => t.kind === 'claude' && t.sessionId === UA);
+    const before = await claudePtys();
+    expect(before).toHaveLength(1);
+
+    await h.setSurface('settings');
+    await h.setSurface('claude');
+
+    await expect(shell.locator('#terminalPane')).toBeVisible({ timeout: 10_000 });
+    await expect(xterm).toBeVisible({ timeout: 10_000 });
+    const box = await xterm.boundingBox();
+    expect(box?.width ?? 0).toBeGreaterThan(0);
+    expect(box?.height ?? 0).toBeGreaterThan(0);
+    await expect
+      .poll(async () => (await claudePtys()).map((t) => t.id))
+      .toEqual([before[0]!.id]);
+  } finally {
+    await closeApp(app);
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('switching from a session on its Terminal tab to one on Chat opens no terminal for it', async () => {
+  const { app, profile } = await launchWithClaudeFixture(fixtures, baseEnv());
+  const h = hooks(app);
+  const logFile = join(profile, 'events.jsonl');
+  const openCount = async () =>
+    (await readEvents(logFile)).filter((e) => e.event === 'terminal-open').length;
+  try {
+    await expect.poll(async () => (await h.claudeState()).status).toBe('ready');
+    await h.setSurface('claude');
+    const shell = await shellPage(app);
+    await h.claudeSelect(UA);
+    await shell.locator('#view-terminal').click();
+    await expect(shell.locator(`[data-session-terminal="${UA}"] .xterm`)).toBeVisible({
+      timeout: 10_000,
+    });
+    const opened = await openCount();
+
+    await h.claudeSelect(UB);
+    await expect(shell.locator('#chatPane')).toBeVisible({ timeout: 10_000 });
+    // Settle: a stray terminalOpen IPC from the stale render would have reached main and logged terminal-open by now.
+    await h.claudeChatState();
+    await shell.waitForTimeout(1_500);
+    await expect
+      .poll(async () => (await h.terminalList()).some((t) => t.sessionId === UB))
+      .toBe(false);
+    expect((await h.claudeChatState()).sessions[UB]?.terminalOwned).toBeFalsy();
+    expect(await openCount()).toBe(opened);
+
+    // Regression guard: UA is remembered on Terminal and shows it without a click.
+    await h.claudeSelect(UA);
+    await expect(shell.locator(`[data-session-terminal="${UA}"] .xterm`)).toBeVisible({
       timeout: 10_000,
     });
   } finally {

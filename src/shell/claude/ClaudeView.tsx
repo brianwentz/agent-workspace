@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { ArrowLeft, GitFork } from 'lucide-react';
 import type { ClaudeChatSessionPublic, LocalResult } from '../../shared/ipc';
 import { CLAUDE_PERMISSION_MODES, isClaudePermissionMode } from '../../core/settingsDraft';
@@ -71,19 +71,20 @@ export function ClaudeView({ style }: { style: CSSProperties }) {
     id && subagentId ? (chat?.subagentSessions[`${id}/${subagentId}`] ?? null) : null;
   const [error, setError] = useState<string | null>(null);
   const loadRequested = useRef<Set<string>>(new Set());
-  // Chat/Terminal tab, remembered per session in shell memory (viewRequests).
-  const [view, setViewState] = useState<ClaudeViewTab>(() => (id ? getLastView(id) : 'chat'));
+  // Chat/Terminal tab: the single copy lives in shell memory (viewRequests), so
+  // it is derived each render (never stale for a newly selected session) and
+  // survives this component unmounting on a surface switch.
+  const [, bumpView] = useReducer((n: number) => n + 1, 0);
+  const view: ClaudeViewTab = id ? getLastView(id) : 'chat';
   const setView = useCallback((next: ClaudeViewTab) => {
-    setViewState(next);
     if (id) rememberView(id, next);
+    bumpView();
   }, [id]);
-  useEffect(() => {
-    if (id) setViewState(getLastView(id));
-  }, [id]);
-  // Lazily open one claude pty per session once the Terminal tab is shown;
-  // every opened session's view stays mounted (display:none) so scrollback
-  // survives session switches. Same pattern as LocalPanel.
-  const [terminalActive, setTerminalActive] = useState(false);
+  // One claude pty per session, opened lazily the first time the Terminal tab
+  // is shown (terminalIds stays empty until then). Every opened session's view
+  // stays mounted (display:none) so scrollback survives session switches. A
+  // surface switch unmounts this component; on return the open effect gets the
+  // same host pty back (terminalHost reuses it per session) in a fresh xterm.
   const [terminalIds, setTerminalIds] = useState<Record<string, string>>({});
   // Attach requests carry the agent id for the next open of that session.
   const attachAgent = useRef<Record<string, string>>({});
@@ -105,7 +106,6 @@ export function ClaudeView({ style }: { style: CSSProperties }) {
     if (!terminalRequest || terminalRequest.sessionId !== id) return;
     if (terminalRequest.agentId) attachAgent.current[id] = terminalRequest.agentId;
     setView('terminal');
-    setTerminalActive(true);
     consumeTerminalRequest(terminalRequest.seq);
   }, [terminalRequest, id, setView]);
 
@@ -281,7 +281,6 @@ export function ClaudeView({ style }: { style: CSSProperties }) {
                   setView(tab);
                   if (tab === 'terminal') {
                     setError(null);
-                    setTerminalActive(true);
                   }
                 }}
               >
@@ -330,24 +329,23 @@ export function ClaudeView({ style }: { style: CSSProperties }) {
         className="flex min-h-0 flex-1 flex-col"
         style={{ display: !subagentId && view === 'terminal' ? 'flex' : 'none' }}
       >
-        {terminalActive &&
-          Object.entries(terminalIds).map(([sid, ptyId]) => (
-            <div
-              key={sid}
-              data-session-terminal={sid}
-              className="flex min-h-0 flex-1 flex-col"
-              style={{ display: sid === id ? 'flex' : 'none' }}
-            >
-              <TerminalView
-                id={ptyId}
-                active={!subagentId && view === 'terminal' && sid === id}
-                onRestart={() => {
-                  window.agentworkspace.terminalClose(ptyId);
-                  forgetTerminal(sid);
-                }}
-              />
-            </div>
-          ))}
+        {Object.entries(terminalIds).map(([sid, ptyId]) => (
+          <div
+            key={sid}
+            data-session-terminal={sid}
+            className="flex min-h-0 flex-1 flex-col"
+            style={{ display: sid === id ? 'flex' : 'none' }}
+          >
+            <TerminalView
+              id={ptyId}
+              active={!subagentId && view === 'terminal' && sid === id}
+              onRestart={() => {
+                window.agentworkspace.terminalClose(ptyId);
+                forgetTerminal(sid);
+              }}
+            />
+          </div>
+        ))}
       </div>
       <div
         id="chatPane"
