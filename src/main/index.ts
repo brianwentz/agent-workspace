@@ -68,7 +68,7 @@ import { notifier } from './notifier';
 import { SecretStore } from './secrets';
 import { requestSettingsFlush } from './settingsFlush';
 import { cancelFolderPrompt } from './folderPrompt';
-import { noteWindowFocus, scheduleBaseline } from './tabPaintDiag';
+import { logGpuFeatureStatus, noteWindowFocus, notePowerEvent } from './tabPaintDiag';
 import { processGoneDetail } from '../core/tabPaintDiag';
 
 // Windows toasts require an AppUserModelID; match electron-builder's appId.
@@ -449,7 +449,6 @@ async function createWindow(): Promise<void> {
     onBeforeUnload,
     preload: resolve(app.getAppPath(), 'out', 'autofill-preload.cjs'),
     onActiveChanged: closeAutofillOverlaysForInactiveTabs,
-    onAttached: scheduleBaseline,
     initialTabs: saved.tabSnapshot,
     testMode,
     keepAliveMs: keepAliveMs(saved.tabs.keepAliveHours),
@@ -480,8 +479,15 @@ async function createWindow(): Promise<void> {
   });
   // ssh hosts whose connection failed (sleep / network change) retry on wake
   // (throttled ≤1/min in hosts().recoverSsh).
-  powerMonitor.on('resume', () => hosts().recoverSsh('resume'));
-  powerMonitor.on('unlock-screen', () => hosts().recoverSsh('unlock'));
+  powerMonitor.on('resume', () => {
+    notePowerEvent('resume');
+    hosts().recoverSsh('resume');
+  });
+  powerMonitor.on('unlock-screen', () => {
+    notePowerEvent('unlock');
+    hosts().recoverSsh('unlock');
+  });
+  logGpuFeatureStatus();
   state.windowRef.on('close', (event) => {
     // Post-shutdown lifecycle: app.quit() closes the window again — let it.
     if (state.shutdownComplete) return;

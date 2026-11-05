@@ -1,5 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RAIL_WIDTH, TITLE_BAR_HEIGHT } from '../../core/layout';
+import {
+  actionForPress,
+  MARK_ACTION_LABEL,
+  nextPress,
+  type MarkAction,
+  type PressState,
+} from '../../core/tabPaintDiag';
 import type { ShellState } from '../../shared/ipc';
 import { NotificationBanner } from './NotificationBanner';
 import { TabStrip } from './TabStrip';
@@ -25,27 +32,52 @@ interface WindowControlsOverlayLike {
   removeEventListener(type: 'geometrychange', listener: () => void): void;
 }
 
-// Diagnostics for the intermittently blank tab pane: tells main "the active tab
-// looks blank right now" so it snapshots the tab without re-attaching it.
-function MarkBlankButton({ disabled }: { disabled: boolean }) {
+const MARK_COOLDOWN_MS = 1500;
+const MARK_BADGE_MS = 2000;
+
+// "The active tab looks blank right now": main snapshots the pane, then tries
+// one rung of repaint -> re-attach -> reload per press. The counter here only
+// feeds the tooltip and follows main's nextPress rule (per tab, 60 s window); main's log is the record.
+function MarkBlankButton({ activeId }: { activeId: string | null }) {
+  const [tried, setTried] = useState<MarkAction | null>(null);
   const [marked, setMarked] = useState(false);
+  const [cooling, setCooling] = useState(false);
+  const press = useRef<PressState | null>(null);
+  // Only the tooltip text: the counter itself follows nextPress.
+  useEffect(() => {
+    setTried(null);
+  }, [activeId]);
   useEffect(() => {
     if (!marked) return;
-    const timer = setTimeout(() => setMarked(false), 2000);
+    const timer = setTimeout(() => setMarked(false), MARK_BADGE_MS);
     return () => clearTimeout(timer);
   }, [marked]);
+  useEffect(() => {
+    if (!cooling) return;
+    const timer = setTimeout(() => setCooling(false), MARK_COOLDOWN_MS);
+    return () => clearTimeout(timer);
+  }, [cooling]);
   return (
     <button
       id="tabMarkBlank"
       type="button"
       aria-label="Report blank tab"
-      title={marked ? 'Recorded — thanks' : 'This tab looks blank: record diagnostics'}
+      title={
+        tried
+          ? `Tried: ${MARK_ACTION_LABEL[tried]}. Still blank? Press again.`
+          : 'This tab looks blank: record diagnostics and try to repaint it'
+      }
       data-state={marked ? 'marked' : 'idle'}
-      disabled={disabled}
+      disabled={!activeId || cooling}
       className={`app-no-drag shrink-0 self-center ${navButton}`}
       onClick={() => {
+        if (!activeId) return;
+        const next = nextPress(press.current, activeId, Date.now());
+        press.current = next;
         window.agentworkspace.markTabBlank();
+        setTried(actionForPress(next.count));
         setMarked(true);
+        setCooling(true);
       }}
     >
       {marked ? '✓' : '⚑'}
@@ -204,7 +236,7 @@ export function TitleBar({
           >
             <StarIcon />
           </button>
-          <MarkBlankButton disabled={!active} />
+          <MarkBlankButton activeId={active ? active.id : null} />
           {drop.hint && (
             <div
               id="tabDropHint"

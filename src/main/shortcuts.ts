@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import { addressBarShortcut } from '../core/addressBarKeys';
-import { createReloadGuard, reloadView } from '../core/reloadGuard';
+import { reloadView } from '../core/reloadGuard';
 import { clampPaneWidth, dockSurface, fractionFromPx, paneWidthPx, sidebarShortcutSurface } from '../core/layout';
 import { newSessionUrl } from '../core/sessions';
 import { HOME_KEY } from '../core/viewPool';
@@ -8,7 +8,6 @@ import { runtimeFor } from './providers';
 import { cloudViews } from './cloudViews';
 import { allPoolViews, poolForSurface } from './cloudKit/pools';
 import { log } from './log';
-import { withActiveTabDiag } from './tabPaintDiag';
 import { state, testMode, type ViewName } from './state';
 import {
   applyLayout,
@@ -19,41 +18,23 @@ import {
   setSessionsOpen,
 } from './window';
 
-export type ReloadSource = 'button' | 'ctrl-r' | 'f5' | 'test';
+export type ReloadSource = 'button' | 'ctrl-r' | 'f5' | 'mark' | 'test';
 
-// Active-tab reloads waiting on their diagnostic snapshot.
-const pendingTabReloads = createReloadGuard<Electron.WebContents>();
-
-// Reloads are logged (never the URL); a reload of the active Linked Context tab
-// first snapshots the pane — a reload is a workaround for the blank pane.
+// Reloads are logged (never the URL).
 function reload(contents: Electron.WebContents, source: ReloadSource): void {
   const tabManager = state.tabManager;
   const tab = !!tabManager && contents === tabManager.activeWebContents;
-  if (!tab) {
-    const view = reloadView({
-      tab,
-      shell: contents === state.shellView?.webContents,
-      provider:
-        contents === state.devinView?.webContents ||
-        allPoolViews().some((pooled) => pooled.webContents === contents),
-      analytics: contents === state.analyticsView?.webContents,
-    });
-    log('shell', 'tab-reload', { detail: { source, tab, view } });
-    contents.reload();
-    return;
-  }
-  const id = tabManager.activeId;
-  const decision = pendingTabReloads.request(contents);
-  if (decision === 'drop') return;
-  if (decision === 'coalesce') {
-    log('shell', 'tab-reload', { detail: { source, tab, view: 'tab', id, coalesced: true } });
-    return;
-  }
-  log('shell', 'tab-reload', { detail: { source, tab, view: 'tab', id } });
-  withActiveTabDiag('reload', () => {
-    pendingTabReloads.done(contents);
-    if (!contents.isDestroyed()) contents.reload();
+  const id = tab ? tabManager?.activeId : undefined;
+  const view = reloadView({
+    tab,
+    shell: contents === state.shellView?.webContents,
+    provider:
+      contents === state.devinView?.webContents ||
+      allPoolViews().some((pooled) => pooled.webContents === contents),
+    analytics: contents === state.analyticsView?.webContents,
   });
+  log('shell', 'tab-reload', { detail: { source, tab, view, ...(tab ? { id } : {}) } });
+  contents.reload();
 }
 
 export function historyAction(

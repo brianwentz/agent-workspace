@@ -82,8 +82,6 @@ export interface TabManagerOptions {
   // Called when the visible/active tab set changed (activate, close, scope
   // switch) — used to dismiss transient overlays like the autofill picker.
   onActiveChanged?: () => void;
-  // Called after a tab's view was (re-)attached as the active view (blank-pane baseline).
-  onAttached?: (tabId: string) => void;
   initialTabs?: unknown;
   testMode: boolean;
   // P8: hidden/non-active tabs keep their webContents live for this long; 0 =
@@ -118,7 +116,6 @@ export class TabManager {
   private readonly onBeforeUnload: TabManagerOptions['onBeforeUnload'];
   private readonly preloadPath: string | undefined;
   private readonly onActiveChanged: (() => void) | undefined;
-  private readonly onAttached: ((tabId: string) => void) | undefined;
   private readonly testMode: boolean;
   private state: TabState;
   private readonly entries = new Map<string, ManagedTab>();
@@ -135,6 +132,8 @@ export class TabManager {
   private lastBounds: Electron.Rectangle | null = null;
   // When the active view was last (re-)attached — read by the blank-pane diagnostics.
   private lastAttachAt = 0;
+  private lastScopeSwitchAtValue = 0;
+  private lastCloseAtValue = 0;
   // History of the most recent attachActive (blank-pane diagnostics).
   private lastAttachHistoryValue: { id: string; history: TabHistory } | null = null;
   // Pane hidden (setBounds(null)) while this tab was active; cleared when shown again.
@@ -149,7 +148,6 @@ export class TabManager {
     this.onBeforeUnload = options.onBeforeUnload;
     this.preloadPath = options.preload;
     this.onActiveChanged = options.onActiveChanged;
-    this.onAttached = options.onAttached;
     this.testMode = options.testMode;
     this.keepAliveMs = options.keepAliveMs ?? DEFAULT_KEEPALIVE_MS;
     this.maxLiveTabs = options.maxLiveTabs ?? DEFAULT_MAX_LIVE_TABS;
@@ -219,6 +217,7 @@ export class TabManager {
   setScope(scope: string): void {
     if (scope === this.scope) return;
     const now = Date.now();
+    this.lastScopeSwitchAtValue = now;
     const previous = this.activeViewId ? this.entries.get(this.activeViewId) : undefined;
     if (previous) previous.lastActiveAt = now;
     this.state = setScopeSeen(this.state, this.scope, now);
@@ -391,6 +390,15 @@ export class TabManager {
 
   get lastAttachedAt(): number {
     return this.lastAttachAt;
+  }
+
+  // 0 until the first scope switch / tab close of this run.
+  get lastScopeSwitchAt(): number {
+    return this.lastScopeSwitchAtValue;
+  }
+
+  get lastCloseAt(): number {
+    return this.lastCloseAtValue;
   }
 
   // Hidden history of the active tab's most recent attach, or null.
@@ -687,10 +695,10 @@ export class TabManager {
         this.paneHidden = { id: tabId, at: now };
       }
     }
-    this.onAttached?.(tabId);
   }
 
-  activate(tabId: string): void {
+  // `via` tags the log line when the blank-pane ladder (not a user click) re-attaches.
+  activate(tabId: string, options?: { via?: 'mark' }): void {
     const entry = this.entries.get(tabId);
     if (!entry) return;
     // User is back on this tab — any earlier beforeunload protection is stale.
@@ -708,6 +716,7 @@ export class TabManager {
     this.log('tab-activate', {
       id: tabId,
       history: attached && attached.id === tabId ? { ...attached.history } : null,
+      ...(options?.via ? { via: options.via } : {}),
     });
     this.enforceLiveCap();
     this.onChange();
@@ -780,6 +789,7 @@ export class TabManager {
       }
     }
 
+    this.lastCloseAtValue = Date.now();
     const scope = scopeOf(entry);
     if (entry.view && this.parent.children.includes(entry.view)) this.parent.removeChildView(entry.view);
     this.entries.delete(tabId);

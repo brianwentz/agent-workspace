@@ -238,7 +238,7 @@ test('overflowing strip scrolls the active tab into view', async () => {
   }
 });
 
-test('clicking the active tab logs a blank-pane diagnostic before re-attaching', async () => {
+test('clicking the active tab re-attaches at once', async () => {
   const profile = mkdtempSync(join(tmpdir(), 'agent-workspace-strip-diag-'));
   const logFile = join(profile, 'events.jsonl');
   const app = await launchApp(profile, logFile, join(profile, 'downloads'), fixtures);
@@ -252,58 +252,21 @@ test('clicking the active tab logs a blank-pane diagnostic before re-attaching',
     expect((await state(app)).tabs.activeId).toBe(b);
     const shell = await shellPage(app);
 
-    // A click on another tab is a plain activation — no diagnostic.
+    // A click on another tab is a plain activation.
     await shell.click(`[data-tab-id="${a}"] .tabTitle`);
     await expect.poll(async () => (await state(app)).tabs.activeId).toBe(a);
-    // Clicking the already-active tab is the blank-pane workaround: diagnosed.
-    await shell.click(`[data-tab-id="${a}"] .tabTitle`);
-    await waitForEvent(logFile, 'tab-reactivate-diag');
-    const events = (await readEvents(logFile)).filter((entry) => entry.event === 'tab-reactivate-diag');
-    expect(events).toHaveLength(1);
-    const detail = events[0]!.detail as Record<string, unknown>;
-    expect(detail).toMatchObject({
-      attached: true,
-      coveredBy: 0,
-      shellAbove: false,
-      boundsMatch: true,
-      paneVisible: true,
-      viewVisible: true,
-      crashed: false,
-      visibility: 'visible',
-      surface: 'cloud',
-    });
-    expect(detail.shellIndex).toBe(0);
-    expect(typeof detail.sinceAttachMs).toBe('number');
-    if (process.platform === 'win32') expect(detail.pixels).toEqual(expect.any(Object));
-    else expect(detail.pixels).toBeNull();
-    expect(detail.trigger).toBe('click-active');
-    expect(detail.history).toEqual(expect.any(Object));
-    expect(typeof (detail.history as Record<string, unknown>).sinceLoadMs).toBe('number');
-    // The diag runs before the re-attach, so its history is that of the previous attach:
-    // the switch from tab b (not active then, hidden for a while).
-    expect(detail.history).toMatchObject({ shownSinceLoad: true, wasActive: false });
-    // Windows are invisible in tests: never assert a specific colour, only the format.
-    const pixels = detail.pixels as Record<string, unknown> | null;
-    if (pixels && typeof pixels === 'object' && !('error' in pixels)) {
-      expect(pixels.topColour).toMatch(/^#[0-9a-f]{6}$/);
-    }
-    // Numbers and booleans only: no URL, title or page text.
-    const line = JSON.stringify(events[0]);
-    expect(events[0]!.url).toBeUndefined();
-    expect(line).not.toContain('diag-a');
-    expect(line).not.toContain('GitHub fixture');
-    // The activation still runs after the snapshot.
-    await waitForEventCount(logFile, 'tab-activate', 2);
-    await expect.poll(async () => (await state(app)).tabs.activeId).toBe(a);
+    const before = (await readEvents(logFile)).filter((entry) => entry.event === 'tab-activate').length;
 
-    // A second click: the previous attach was the click-active re-attach of the already-active tab.
+    // Clicking the already-active tab is the blank-pane workaround: it re-attaches with no wait.
     await shell.click(`[data-tab-id="${a}"] .tabTitle`);
-    await waitForEventCount(logFile, 'tab-reactivate-diag', 2);
-    const second = (await readEvents(logFile)).filter((entry) => entry.event === 'tab-reactivate-diag')[1]!;
-    const secondDetail = second.detail as Record<string, unknown>;
-    expect(secondDetail.trigger).toBe('click-active');
-    expect(secondDetail.history).toMatchObject({ shownSinceLoad: true, wasActive: true, hiddenMs: 0 });
-    expect(typeof (secondDetail.history as Record<string, unknown>).sinceLoadMs).toBe('number');
+    await waitForEventCount(logFile, 'tab-activate', before + 1);
+    const activations = (await readEvents(logFile)).filter((entry) => entry.event === 'tab-activate');
+    expect(activations).toHaveLength(before + 1);
+    const last = activations[activations.length - 1]!;
+    expect(last.detail).toMatchObject({ id: a, history: { wasActive: true } });
+    expect(last.detail).not.toHaveProperty('via');
+    expect((await readEvents(logFile)).filter((entry) => entry.event === 'tab-reactivate-diag')).toHaveLength(0);
+    expect((await state(app)).tabs.activeId).toBe(a);
   } finally {
     await app.evaluate(({ app: electronApp }) => electronApp.quit()).catch(() => undefined);
     await app.close().catch(() => undefined);
@@ -342,7 +305,7 @@ async function withApp(
 }
 
 for (const reloadCase of RELOAD_CASES) {
-  test(`reloading the active tab (${reloadCase.name}) logs the reload and a diag before the load starts`, async () => {
+  test(`reloading the active tab (${reloadCase.name}) logs one reload before the load starts`, async () => {
     await withApp('agent-workspace-strip-reload-', async (app, logFile) => {
       await openTab(app, `${fixtures.githubUrl}/page/reload-a`);
       await waitForTabTitle(app, 'reload-a');
@@ -374,19 +337,13 @@ for (const reloadCase of RELOAD_CASES) {
       const reloads = await eventsNamed(logFile, 'tab-reload');
       expect(reloads).toHaveLength(1);
       expect(reloads[0]!.detail).toMatchObject({ source: reloadCase.source, tab: true, view: 'tab' });
-      const diags = (await eventsNamed(logFile, 'tab-reactivate-diag')).filter(
-        (entry) => entry.detail?.trigger === 'reload',
-      );
-      expect(diags).toHaveLength(1);
-      expect(diags[0]!.detail!.id).toBe(reloads[0]!.detail!.id);
+      expect(reloads[0]!.detail).not.toHaveProperty('coalesced');
+      expect(await eventsNamed(logFile, 'tab-reactivate-diag')).toHaveLength(0);
       expect(Date.parse(reloads[0]!.ts)).toBeLessThanOrEqual(loadStartedAt);
-      expect(Date.parse(diags[0]!.ts)).toBeLessThanOrEqual(loadStartedAt);
-      for (const entry of [reloads[0]!, diags[0]!]) {
-        const line = JSON.stringify(entry);
-        expect(entry.url).toBeUndefined();
-        expect(line).not.toContain('reload-a');
-        expect(line).not.toContain('GitHub fixture');
-      }
+      const line = JSON.stringify(reloads[0]);
+      expect(reloads[0]!.url).toBeUndefined();
+      expect(line).not.toContain('reload-a');
+      expect(line).not.toContain('GitHub fixture');
     });
   });
 }
@@ -520,55 +477,106 @@ test('a hidden tab reloaded in the background reports loadedHidden on its next a
   });
 });
 
-// The page-side and renderer-frame parts every blank-pane snapshot carries.
-function expectSnapshotParts(detail: Record<string, unknown>): void {
-  const page = detail.page as Record<string, unknown>;
-  expect(page).toMatchObject({ visibility: 'visible', readyState: 'complete' });
-  expect(page.elements as number).toBeGreaterThan(0);
-  expect(page.inViewport as number).toBeGreaterThan(0);
-  expect(page.textLength as number).toBeGreaterThan(0);
-  expect(detail.visibility).toBe('visible');
-  expect(typeof detail.pageAt).toBe('number');
-  expect(typeof detail.frameAt).toBe('number');
-  const frame = detail.frame as Record<string, unknown>;
-  expect(frame).toEqual(expect.any(Object));
-  if (!('error' in frame)) {
-    expect(frame.samples as number).toBeGreaterThan(0);
-    expect(frame.topColour).toMatch(/^#[0-9a-f]{6}$/);
-  }
+// Presses the button and waits for its cooldown (disabled, then enabled again).
+async function pressMark(shell: Page): Promise<void> {
+  await shell.click('#tabMarkBlank');
+  await expect(shell.locator('#tabMarkBlank')).toBeDisabled();
+  await expect(shell.locator('#tabMarkBlank')).toBeEnabled();
 }
 
-test('the mark-as-blank button snapshots the active tab without re-attaching it', async () => {
+test('the mark button repaints, then re-attaches, then reloads', async () => {
   await withApp('agent-workspace-strip-blank-', async (app, logFile) => {
-    const id = await openTab(app, `${fixtures.githubUrl}/page/blank-a`);
+    const a = await openTab(app, `${fixtures.githubUrl}/page/blank-a`);
     await waitForTabTitle(app, 'blank-a');
+    const b = await openTab(app, `${fixtures.githubUrl}/page/blank-b`);
+    await waitForTabTitle(app, 'blank-b');
     const shell = await shellPage(app);
-    const activationsBefore = (await eventsNamed(logFile, 'tab-activate')).length;
+    await shell.click(`[data-tab-id="${a}"] .tabTitle`);
+    await expect.poll(async () => (await state(app)).tabs.activeId).toBe(a);
 
-    await shell.click('#tabMarkBlank');
-    await expect(shell.locator('#tabMarkBlank')).toHaveAttribute('data-state', 'marked');
-    await waitForEvent(logFile, 'tab-blank-marked');
-    await expect
-      .poll(async () =>
-        (await eventsNamed(logFile, 'tab-reactivate-diag')).filter((e) => e.detail?.trigger === 'marked-blank').length,
-      )
-      .toBe(1);
-    const marks = await eventsNamed(logFile, 'tab-blank-marked');
-    expect(marks).toHaveLength(1);
-    expect(marks[0]!.detail).toEqual({ id });
-    const diag = (await eventsNamed(logFile, 'tab-reactivate-diag')).find((e) => e.detail?.trigger === 'marked-blank')!;
-    expect(diag.detail).toMatchObject({ id, attached: true, boundsMatch: true, crashed: false });
-    expectSnapshotParts(diag.detail!);
-    // No re-attach: the user can still click the tab afterwards to see whether that fixes it.
-    expect((await eventsNamed(logFile, 'tab-activate')).length).toBe(activationsBefore);
-    for (const entry of [marks[0]!, diag]) {
+    // Spies on the active tab: invalidate() calls, adds of its view to the window, loads.
+    await app.evaluate(({ BaseWindow, webContents }) => {
+      const g = globalThis as any;
+      const contents = webContents.fromId(g.__agentworkspace.activeTabWebContentsId())!;
+      const spy = { id: contents.id, invalidate: 0, adds: 0, loads: 0 };
+      g.__markSpy = spy;
+      const originalInvalidate = contents.invalidate.bind(contents);
+      contents.invalidate = () => {
+        spy.invalidate++;
+        originalInvalidate();
+      };
+      const contentView = BaseWindow.getAllWindows()[0]!.contentView as any;
+      const originalAdd = contentView.addChildView.bind(contentView);
+      contentView.addChildView = (view: any, index?: number) => {
+        if (view?.webContents?.id === spy.id) spy.adds++;
+        return originalAdd(view, index);
+      };
+      contents.on('did-start-loading', () => {
+        spy.loads++;
+      });
+    });
+    const spy = () =>
+      app.evaluate(() => (globalThis as any).__markSpy as { invalidate: number; adds: number; loads: number });
+    const activations = async () => (await eventsNamed(logFile, 'tab-activate')).length;
+    const marks = () => eventsNamed(logFile, 'tab-blank-marked');
+    const reloadsBefore = (await eventsNamed(logFile, 'tab-reload')).length;
+
+    // Press 1: repaint only.
+    let activationsBefore = await activations();
+    let spyBefore = await spy();
+    await pressMark(shell);
+    await expect.poll(async () => (await marks()).length).toBe(1);
+    expect((await marks())[0]!.detail).toMatchObject({
+      id: a,
+      press: 1,
+      action: 'invalidate',
+      applied: true,
+      sincePrevPressMs: null,
+      attached: true,
+      crashed: false,
+    });
+    expect(await spy()).toMatchObject({ invalidate: spyBefore.invalidate + 1, adds: spyBefore.adds, loads: 0 });
+    expect(await activations()).toBe(activationsBefore);
+
+    // Press 2: the same re-attach as clicking the active tab, tagged `via:'mark'`.
+    activationsBefore = await activations();
+    spyBefore = await spy();
+    await pressMark(shell);
+    await expect.poll(async () => (await marks()).length).toBe(2);
+    expect((await marks())[1]!.detail).toMatchObject({ id: a, press: 2, action: 'reattach', applied: true });
+    expect(typeof (await marks())[1]!.detail!.sincePrevPressMs).toBe('number');
+    await expect.poll(activations).toBe(activationsBefore + 1);
+    const activate = (await eventsNamed(logFile, 'tab-activate')).pop()!;
+    expect(activate.detail).toMatchObject({ id: a, via: 'mark', history: { wasActive: true } });
+    expect(await spy()).toMatchObject({ invalidate: spyBefore.invalidate, adds: spyBefore.adds + 1, loads: 0 });
+
+    // Press 3: reload.
+    spyBefore = await spy();
+    await pressMark(shell);
+    await expect.poll(async () => (await marks()).length).toBe(3);
+    expect((await marks())[2]!.detail).toMatchObject({ id: a, press: 3, action: 'reload', applied: true });
+    await expect.poll(async () => (await spy()).loads).toBeGreaterThan(0);
+    const reloads = (await eventsNamed(logFile, 'tab-reload')).slice(reloadsBefore);
+    expect(reloads).toHaveLength(1);
+    expect(reloads[0]!.detail).toMatchObject({ source: 'mark', tab: true, view: 'tab', id: a });
+    expect((await spy()).invalidate).toBe(spyBefore.invalidate);
+
+    // Another tab restarts the ladder.
+    await shell.click(`[data-tab-id="${b}"] .tabTitle`);
+    await expect.poll(async () => (await state(app)).tabs.activeId).toBe(b);
+    await pressMark(shell);
+    await expect.poll(async () => (await marks()).length).toBe(4);
+    expect((await marks())[3]!.detail).toMatchObject({ id: b, press: 1, action: 'invalidate', applied: true });
+
+    for (const entry of await marks()) {
       const line = JSON.stringify(entry);
       expect(entry.url).toBeUndefined();
       expect(line).not.toContain('blank-a');
+      expect(line).not.toContain('blank-b');
       expect(line).not.toContain('GitHub fixture');
+      expect(entry.detail).toMatchObject({ attached: true, crashed: false });
     }
-    // The feedback clears by itself.
-    await expect(shell.locator('#tabMarkBlank')).toHaveAttribute('data-state', 'idle', { timeout: 5000 });
+    expect(await eventsNamed(logFile, 'tab-reactivate-diag')).toHaveLength(0);
   });
 });
 
@@ -578,22 +586,4 @@ test('the mark-as-blank button is disabled without an active tab', async () => {
     await expect(shell.locator('#tabMarkBlank')).toBeDisabled();
     expect(await eventsNamed(logFile, 'tab-blank-marked')).toHaveLength(0);
   });
-});
-
-test('an activation logs a throttled tab-paint-baseline of the shown tab', async () => {
-  await withApp(
-    'agent-workspace-strip-baseline-',
-    async (app, logFile) => {
-      const a = await openTab(app, `${fixtures.githubUrl}/page/base-a`);
-      await waitForTabTitle(app, 'base-a');
-      await expect.poll(async () => (await eventsNamed(logFile, 'tab-paint-baseline')).length).toBeGreaterThan(0);
-      const baseline = (await eventsNamed(logFile, 'tab-paint-baseline'))[0]!;
-      expect(baseline.detail).toMatchObject({ trigger: 'baseline', id: a, attached: true, boundsMatch: true });
-      expectSnapshotParts(baseline.detail!);
-      expect(JSON.stringify(baseline)).not.toContain('base-a');
-      // Baselines are their own event: no tab-reactivate-diag from them.
-      expect(await eventsNamed(logFile, 'tab-reactivate-diag')).toHaveLength(0);
-    },
-    { AGENT_WORKSPACE_TEST_BASELINE_MS: '300' },
-  );
 });

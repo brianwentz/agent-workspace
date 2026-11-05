@@ -3,7 +3,7 @@ import { guardedHandle, guardedOn } from './ipcGuard';
 import { openFolderDialog } from './dialogs';
 import { clampFraction01 } from '../core/layout';
 import { closeAutofillOverlays } from './autofill';
-import { markActiveTabBlank, withReactivateDiag } from './tabPaintDiag';
+import { markActiveTabBlank } from './tabPaintDiag';
 import {
   CredentialDeleteSchema,
   CredentialRevealSchema,
@@ -185,10 +185,8 @@ export function setupIpc(): void {
   guardedOn(IpcChannels.tabActivate, (_event, id: unknown) => {
     const parsed = TabIdArg.safeParse(id);
     if (!parsed.success) return;
-    withReactivateDiag(parsed.data, () => {
-      state.tabManager?.activate(parsed.data);
-      applyLayout();
-    });
+    state.tabManager?.activate(parsed.data);
+    applyLayout();
   });
   guardedOn(IpcChannels.tabClose, (_event, id: unknown) => {
     const parsed = TabIdArg.safeParse(id);
@@ -238,7 +236,13 @@ export function setupIpc(): void {
   });
   // "Mark as blank" button: no payload — the active tab is the one diagnosed.
   guardedOn(IpcChannels.tabsMarkBlank, () => {
-    markActiveTabBlank();
+    markActiveTabBlank({
+      reattach: (id) => {
+        state.tabManager?.activate(id, { via: 'mark' });
+        applyLayout();
+      },
+      reload: (contents) => historyAction('reload', contents, 'mark'),
+    });
   });
   guardedOn(IpcChannels.tabsDropTypes, (_event, payload: unknown) => {
     if (!debugDrops) return;
