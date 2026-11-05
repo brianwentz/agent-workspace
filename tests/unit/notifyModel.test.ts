@@ -5,6 +5,7 @@ import {
   IDLE_POLL_MS,
   archivedScopes,
   autoOpenScopes,
+  mergedParentOf,
   rootSessionId,
   scopeLabel,
   backoffMs,
@@ -371,6 +372,19 @@ describe('catchUpPullRequests', () => {
   });
 });
 
+describe('mergedParentOf (v3 + Cloud parent links)', () => {
+  it('prefers the v3 parent link and falls back to the Cloud list', () => {
+    const parentOf = mergedParentOf(
+      [{ session_id: 'gc', parent_session_id: 'mid' }, { session_id: 'mid' }],
+      new Map([['mid', 'root'], ['gc', 'stale']]),
+    );
+    expect(parentOf('gc')).toBe('mid');
+    expect(parentOf('mid')).toBe('root');
+    expect(parentOf('root')).toBeUndefined();
+    expect(autoOpenScopes('gc', parentOf)).toEqual(['gc', 'mid', 'root']);
+  });
+});
+
 describe('rootSessionId / autoOpenScopes (sub-session PR tabs)', () => {
   const parents: Record<string, string | null> = { child: 'root', grandchild: 'child', root: null };
   const parentOf = (id: string) => parents[id];
@@ -390,9 +404,15 @@ describe('rootSessionId / autoOpenScopes (sub-session PR tabs)', () => {
     expect(rootSessionId('a', (id) => cyclic[id])).toBe('b');
   });
 
-  it('opens a sub-session PR in the sub-session and its top-level session', () => {
-    expect(autoOpenScopes('grandchild', parentOf)).toEqual(['grandchild', 'root']);
+  it('opens a sub-session PR in the sub-session and every ancestor up to the top-level session', () => {
+    // The middle session is where the user works when a nested sub-session opens the PR.
+    expect(autoOpenScopes('grandchild', parentOf)).toEqual(['grandchild', 'child', 'root']);
     expect(autoOpenScopes('child', parentOf)).toEqual(['child', 'root']);
+  });
+
+  it('stops on a parent cycle without repeating a scope', () => {
+    const cyclic: Record<string, string> = { a: 'b', b: 'a' };
+    expect(autoOpenScopes('a', (id) => cyclic[id])).toEqual(['a', 'b']);
   });
 
   it('opens a top-level or unknown session PR in that session only', () => {

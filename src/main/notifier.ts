@@ -9,6 +9,7 @@ import {
   IDLE_POLL_MS,
   archivedScopes,
   autoOpenScopes,
+  mergedParentOf,
   backoffMs,
   catchUpPullRequests,
   newPullRequests,
@@ -407,18 +408,22 @@ class Notifier {
             detail: { count: candidates.length, lastGoodAgeMs: Date.now() - prLedger().lastGoodAt() },
           });
         }
-        // Sub-session PRs also open in the top-level session's scope (the
-        // Cloud list knows the parent links; the v3 list does not).
-        const parents = new Map(
-          cloudSessions()
-            .snapshot()
-            .sessions.map((session) => [session.id, session.parentId] as const),
+        // Sub-session PRs also open in every ancestor session's scope. Parent
+        // links: v3 `parent_session_id` (any depth), then the Cloud list (which
+        // only lists direct children of top-level sessions).
+        const parentOf = mergedParentOf(
+          sessions,
+          new Map(
+            cloudSessions()
+              .snapshot()
+              .sessions.map((session) => [session.id, session.parentId] as const),
+          ),
         );
         let opened = 0;
         for (const pr of candidates) {
           const decision = route(pr.url, 'shell', 'new-window', routeContext());
           if (decision.kind !== 'gh-tab') continue;
-          const scopes = autoOpenScopes(pr.sessionId, (id) => parents.get(id));
+          const scopes = autoOpenScopes(pr.sessionId, parentOf);
           for (const scope of scopes) {
             state.tabManager.open(pr.url, { background: true, originSessionId: scope, lazy: true });
           }
@@ -427,7 +432,9 @@ class Notifier {
             detail: {
               sessionId: pr.sessionId,
               catchUp: baseline,
-              ...(scopes.length > 1 ? { rootSessionId: scopes[1] } : {}),
+              ...(scopes.length > 1
+                ? { rootSessionId: scopes[scopes.length - 1], scopeCount: scopes.length }
+                : {}),
             },
           });
           opened += 1;

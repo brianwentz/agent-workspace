@@ -38,6 +38,9 @@ export interface DevinSession {
   url?: string | undefined;
   user_id: string | null;
   service_user_id: string | null;
+  // Bare id of the session that spawned this one (v3 `parent_session_id`), or
+  // null for a top-level session. Optional so hand-built literals can omit it.
+  parent_session_id?: string | null;
   pull_requests: DevinPullRequest[];
 }
 
@@ -99,6 +102,13 @@ function str(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+// v3 ids may carry the `devin-` prefix; tab scopes use the bare id.
+function bareId(value: string | null): string | null {
+  if (!value) return null;
+  const id = value.startsWith('devin-') ? value.slice('devin-'.length) : value;
+  return id || null;
+}
+
 export function normalizeSession(raw: unknown): DevinSession | null {
   const record = asRecord(raw);
   if (!record) return null;
@@ -131,6 +141,7 @@ export function normalizeSession(raw: unknown): DevinSession | null {
     url: str(record.url) ?? undefined,
     user_id: str(record.user_id),
     service_user_id: str(record.service_user_id),
+    parent_session_id: bareId(str(record.parent_session_id)),
     pull_requests: pullRequests,
   };
 }
