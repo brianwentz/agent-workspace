@@ -25,34 +25,6 @@ interface WindowControlsOverlayLike {
   removeEventListener(type: 'geometrychange', listener: () => void): void;
 }
 
-// Diagnostics for the intermittently blank tab pane: tells main "the active tab
-// looks blank right now" so it snapshots the tab without re-attaching it.
-function MarkBlankButton({ disabled }: { disabled: boolean }) {
-  const [marked, setMarked] = useState(false);
-  useEffect(() => {
-    if (!marked) return;
-    const timer = setTimeout(() => setMarked(false), 2000);
-    return () => clearTimeout(timer);
-  }, [marked]);
-  return (
-    <button
-      id="tabMarkBlank"
-      type="button"
-      aria-label="Report blank tab"
-      title={marked ? 'Recorded — thanks' : 'This tab looks blank: record diagnostics'}
-      data-state={marked ? 'marked' : 'idle'}
-      disabled={disabled}
-      className={`app-no-drag shrink-0 self-center ${navButton}`}
-      onClick={() => {
-        window.agentworkspace.markTabBlank();
-        setMarked(true);
-      }}
-    >
-      {marked ? '✓' : '⚑'}
-    </button>
-  );
-}
-
 function windowControlsOverlay(): WindowControlsOverlayLike | null {
   const candidate = (navigator as { windowControlsOverlay?: WindowControlsOverlayLike })
     .windowControlsOverlay;
@@ -204,7 +176,6 @@ export function TitleBar({
           >
             <StarIcon />
           </button>
-          <MarkBlankButton disabled={!active} />
           {drop.hint && (
             <div
               id="tabDropHint"

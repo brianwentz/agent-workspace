@@ -23,7 +23,6 @@ import {
   type PersistedTabs,
   type TabState,
 } from '../core/tabModel';
-import { loadStartReset, tabHistory, type TabHistory } from '../core/tabPaintDiag';
 
 interface ManagedTab extends BrowserTab {
   view: WebContentsView | null;
@@ -37,10 +36,6 @@ interface ManagedTab extends BrowserTab {
   discarded: boolean;
   discarding: boolean;
   lastActiveAt: number;
-  // When the current webContents started loading (0 = no view yet) and whether
-  // it has been attached since — read by the blank-pane diagnostics.
-  loadedAt: number;
-  shownSinceLoad: boolean;
 }
 
 export interface TabOpenOptions {
@@ -82,8 +77,6 @@ export interface TabManagerOptions {
   // Called when the visible/active tab set changed (activate, close, scope
   // switch) — used to dismiss transient overlays like the autofill picker.
   onActiveChanged?: () => void;
-  // Called after a tab's view was (re-)attached as the active view (blank-pane baseline).
-  onAttached?: (tabId: string) => void;
   initialTabs?: unknown;
   testMode: boolean;
   // P8: hidden/non-active tabs keep their webContents live for this long; 0 =
@@ -118,7 +111,6 @@ export class TabManager {
   private readonly onBeforeUnload: TabManagerOptions['onBeforeUnload'];
   private readonly preloadPath: string | undefined;
   private readonly onActiveChanged: (() => void) | undefined;
-  private readonly onAttached: ((tabId: string) => void) | undefined;
   private readonly testMode: boolean;
   private state: TabState;
   private readonly entries = new Map<string, ManagedTab>();
@@ -133,12 +125,6 @@ export class TabManager {
   private sweepTimer: NodeJS.Timeout | null = null;
   // Attached views get the last layout rect so a scope switch never shows a 0x0 view.
   private lastBounds: Electron.Rectangle | null = null;
-  // When the active view was last (re-)attached — read by the blank-pane diagnostics.
-  private lastAttachAt = 0;
-  // History of the most recent attachActive (blank-pane diagnostics).
-  private lastAttachHistoryValue: { id: string; history: TabHistory } | null = null;
-  // Pane hidden (setBounds(null)) while this tab was active; cleared when shown again.
-  private paneHidden: { id: string; at: number } | null = null;
 
   constructor(options: TabManagerOptions) {
     this.parent = options.parent;
@@ -149,7 +135,6 @@ export class TabManager {
     this.onBeforeUnload = options.onBeforeUnload;
     this.preloadPath = options.preload;
     this.onActiveChanged = options.onActiveChanged;
-    this.onAttached = options.onAttached;
     this.testMode = options.testMode;
     this.keepAliveMs = options.keepAliveMs ?? DEFAULT_KEEPALIVE_MS;
     this.maxLiveTabs = options.maxLiveTabs ?? DEFAULT_MAX_LIVE_TABS;
@@ -168,8 +153,6 @@ export class TabManager {
         discarded: true, // restored tabs are state-safe placeholders; load on activation
         discarding: false,
         lastActiveAt: Date.now(),
-        loadedAt: 0,
-        shownSinceLoad: false,
       });
     }
     this.scheduleSweep();
@@ -230,13 +213,8 @@ export class TabManager {
     this.scope = scope;
 
     const activeId = activeIdFor(this.state, scope);
+    this.log('tabs-scope-switch', { scope });
     if (activeId) this.attachActive(activeId);
-    const attached = this.lastAttachHistoryValue;
-    if (activeId && this.activeViewId === activeId && attached?.id === activeId) {
-      this.log('tabs-scope-switch', { scope, id: activeId, history: { ...attached.history } });
-    } else {
-      this.log('tabs-scope-switch', { scope });
-    }
     this.enforceLiveCap();
     if (this.keepAliveMs === 0) {
       // Discard every live tab belonging to a now-hidden scope (state-safe).
@@ -384,21 +362,6 @@ export class TabManager {
     return this.activeView?.webContents ?? null;
   }
 
-  // The pane bounds the active view should have (null while the pane is hidden).
-  get expectedBounds(): Electron.Rectangle | null {
-    return this.lastBounds;
-  }
-
-  get lastAttachedAt(): number {
-    return this.lastAttachAt;
-  }
-
-  // Hidden history of the active tab's most recent attach, or null.
-  get lastAttachHistory(): TabHistory | null {
-    const last = this.lastAttachHistoryValue;
-    return last && last.id === this.activeViewId ? last.history : null;
-  }
-
   get currentState(): TabState {
     return this.state;
   }
@@ -476,8 +439,6 @@ export class TabManager {
       discarded: lazy,
       discarding: false,
       lastActiveAt: Date.now(),
-      loadedAt: 0,
-      shownSinceLoad: false,
     };
     this.entries.set(result.id, entry);
     if (lazy) {
@@ -535,8 +496,6 @@ export class TabManager {
       this.log('tab-restore', { id: tabId }, entry.url);
     }
     entry.loading = true;
-    entry.loadedAt = Date.now();
-    entry.shownSinceLoad = false;
     view.setBackgroundColor('#111827');
     const contents = view.webContents;
 
@@ -550,18 +509,6 @@ export class TabManager {
       entry.favicon = favicons[0];
       this.log('favicon', { id: tabId, favicon: entry.favicon }, contents.getURL());
       this.onChange();
-    });
-    // Every main-frame load (first load, reload, in-tab navigation) restarts the
-    // load clock; it counts as shown only if it starts while visible in the pane.
-    contents.on('did-start-navigation', (details) => {
-      if (!details.isMainFrame || details.isSameDocument || entry.view !== view) return;
-      const reset = loadStartReset({
-        now: Date.now(),
-        attached: this.activeViewId === tabId && this.parent.children.includes(view),
-        paneVisible: this.lastBounds !== null,
-      });
-      entry.loadedAt = reset.loadedAt;
-      entry.shownSinceLoad = reset.shownSinceLoad;
     });
     contents.on('did-start-loading', () => {
       entry.loading = true;
@@ -613,13 +560,6 @@ export class TabManager {
         contents.getURL(),
       );
     });
-    // No url argument: these carry the tab id only.
-    contents.on('unresponsive', () => {
-      this.log('tab-unresponsive', { id: tabId });
-    });
-    contents.on('responsive', () => {
-      this.log('tab-responsive', { id: tabId });
-    });
     contents.on('destroyed', () => {
       this.log('webcontents-destroyed', { id: tabId }, entry.url);
       // Identity check: a later ensureView may already own a fresh view for this tab.
@@ -640,15 +580,6 @@ export class TabManager {
 
   // Swap the attached view to `tabId`'s view (creating/restoring as needed).
   private attachActive(tabId: string): void {
-    // Captured before anything below mutates the entry (ensureView, lastActiveAt).
-    const before = this.entries.get(tabId);
-    const createdOnAttach = !before?.view || before.view.webContents.isDestroyed();
-    const wasActive = this.activeViewId === tabId;
-    const lastActiveAt = before?.lastActiveAt ?? 0;
-    const loadedAt = before?.loadedAt ?? 0;
-    const shownSinceLoad = before?.shownSinceLoad ?? false;
-    // A failed attach must not leave an older attach's history behind for this activation.
-    if (this.lastAttachHistoryValue?.id === tabId) this.lastAttachHistoryValue = null;
     this.ensureView(tabId);
     const view = this.entries.get(tabId)?.view;
     if (!view || view.webContents.isDestroyed()) return;
@@ -661,33 +592,9 @@ export class TabManager {
     // hide/show round-trip on attach forces that cycle every time.
     view.setVisible(false);
     view.setVisible(true);
-    this.lastAttachAt = Date.now();
     this.activeViewId = tabId;
     const entry = this.entries.get(tabId);
-    if (entry) {
-      const now = Date.now();
-      this.lastAttachHistoryValue = {
-        id: tabId,
-        history: tabHistory({
-          now,
-          lastActiveAt,
-          // A view created by this attach: its fresh load, never shown yet.
-          loadedAt: createdOnAttach ? entry.loadedAt : loadedAt,
-          shownSinceLoad: createdOnAttach ? false : shownSinceLoad,
-          createdOnAttach,
-          wasActive,
-        }),
-      };
-      entry.lastActiveAt = now;
-      if (this.lastBounds !== null) {
-        entry.shownSinceLoad = true;
-      } else if (this.paneHidden?.id !== tabId) {
-        // Attached into a hidden pane (0x0): not shown yet; the next pane show
-        // logs `tab-pane-shown` for this tab, timed from this attach.
-        this.paneHidden = { id: tabId, at: now };
-      }
-    }
-    this.onAttached?.(tabId);
+    if (entry) entry.lastActiveAt = Date.now();
   }
 
   activate(tabId: string): void {
@@ -704,11 +611,7 @@ export class TabManager {
       this.parent.removeChildView(current);
     }
     this.attachActive(tabId);
-    const attached = this.lastAttachHistoryValue;
-    this.log('tab-activate', {
-      id: tabId,
-      history: attached && attached.id === tabId ? { ...attached.history } : null,
-    });
+    this.log('tab-activate', { id: tabId });
     this.enforceLiveCap();
     this.onChange();
     this.onActiveChanged?.();
@@ -716,7 +619,6 @@ export class TabManager {
 
   setBounds(bounds: Electron.Rectangle | null): void {
     this.lastBounds = bounds;
-    this.notePaneVisibility(bounds !== null);
     const active = this.activeView;
     if (!active) return;
     active.setBounds(
@@ -729,30 +631,14 @@ export class TabManager {
     );
   }
 
-  // Pane hide/show while the same tab stays active: logs how long it was hidden.
-  private notePaneVisibility(visible: boolean): void {
-    const activeId = this.activeView ? this.activeViewId : null;
-    if (!visible) {
-      if (!this.paneHidden && activeId) this.paneHidden = { id: activeId, at: Date.now() };
-      return;
-    }
-    const hidden = this.paneHidden;
-    if (!hidden) return;
-    this.paneHidden = null;
-    if (hidden.id !== activeId) return;
-    const hiddenMs = Date.now() - hidden.at;
-    const entry = this.entries.get(hidden.id);
-    if (entry) entry.shownSinceLoad = true;
-    this.log('tab-pane-shown', { id: hidden.id, hiddenMs });
-    const last = this.lastAttachHistoryValue;
-    if (last && last.id === hidden.id) last.history.paneHiddenMs = hiddenMs;
-  }
-
   async close(tabId: string): Promise<boolean> {
     const entry = this.entries.get(tabId);
     if (!entry || entry.closing) return false;
     entry.closing = true;
     entry.closeCancelled = false;
+    // Read before the await: the view's 'destroyed' handler clears activeViewId while
+    // contents.close() runs, which would otherwise skip attaching the next tab.
+    const wasActive = this.activeViewId === tabId;
     const contents = entry.view?.webContents;
 
     if (contents && !contents.isDestroyed()) {
@@ -784,7 +670,7 @@ export class TabManager {
     if (entry.view && this.parent.children.includes(entry.view)) this.parent.removeChildView(entry.view);
     this.entries.delete(tabId);
     this.state = closeTab(this.state, tabId);
-    if (this.activeViewId === tabId) {
+    if (this.activeViewId === tabId || (wasActive && this.activeViewId === null && this.scope === scope)) {
       this.activeViewId = null;
       const next = activeIdFor(this.state, scope);
       if (next) this.activate(next);

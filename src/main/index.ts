@@ -68,8 +68,6 @@ import { notifier } from './notifier';
 import { SecretStore } from './secrets';
 import { requestSettingsFlush } from './settingsFlush';
 import { cancelFolderPrompt } from './folderPrompt';
-import { noteWindowFocus, scheduleBaseline } from './tabPaintDiag';
-import { processGoneDetail } from '../core/tabPaintDiag';
 
 // Windows toasts require an AppUserModelID; match electron-builder's appId.
 if (process.platform === 'win32') app.setAppUserModelId('io.github.brianwentz.agent-workspace');
@@ -449,7 +447,6 @@ async function createWindow(): Promise<void> {
     onBeforeUnload,
     preload: resolve(app.getAppPath(), 'out', 'autofill-preload.cjs'),
     onActiveChanged: closeAutofillOverlaysForInactiveTabs,
-    onAttached: scheduleBaseline,
     initialTabs: saved.tabSnapshot,
     testMode,
     keepAliveMs: keepAliveMs(saved.tabs.keepAliveHours),
@@ -473,7 +470,6 @@ async function createWindow(): Promise<void> {
   state.windowRef.on('resize', applyLayout);
   // Re-poll immediately on focus while the poller is in error (backoff drop).
   state.windowRef.on('focus', () => {
-    noteWindowFocus();
     for (const runtime of runtimes()) runtime.onFocus?.();
     hosts().onWindowFocus();
     updateOnWindowFocus();
@@ -545,10 +541,6 @@ app
 
 app.on('activate', () => {
   if (!state.windowRef) void createWindow();
-});
-// Renderer/GPU/utility process exits (type/reason/exitCode only).
-app.on('child-process-gone', (_event, details) => {
-  log('shell', 'child-process-gone', { detail: processGoneDetail(details) });
 });
 // During shutdown the window destroy() re-enters window-all-closed — let the
 // shutdown tail issue the single quit instead of starting an in-flight quit
