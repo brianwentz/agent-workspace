@@ -140,14 +140,32 @@ export function rootSessionId(
 }
 
 // The tab scopes an auto-opened PR of `sessionId` goes into: the session's own
-// scope, plus its top-level session's when it is a sub-session — so the PR is
-// visible both while working in the sub-session and from the main session.
+// scope plus every ancestor's up to the top-level session — so a PR opened by a
+// nested sub-session is visible in the session the user is actually working in,
+// whichever level that is. Cycle-safe; ancestors come nearest-first.
 export function autoOpenScopes(
   sessionId: string,
   parentOf: (id: string) => string | null | undefined,
 ): string[] {
-  const root = rootSessionId(sessionId, parentOf);
-  return root === sessionId ? [sessionId] : [sessionId, root];
+  const scopes = [sessionId];
+  for (let parent = parentOf(sessionId); parent && !scopes.includes(parent); parent = parentOf(parent)) {
+    scopes.push(parent);
+  }
+  return scopes;
+}
+
+// Parent links for autoOpenScopes: the v3 session's own `parent_session_id`
+// first (it covers sub-sessions at any depth), then the Cloud list's
+// `parentId` (which only lists direct children of top-level sessions).
+export function mergedParentOf(
+  apiSessions: readonly Pick<DevinSession, 'session_id' | 'parent_session_id'>[],
+  cloudParents: ReadonlyMap<string, string | null>,
+): (id: string) => string | null | undefined {
+  const v3 = new Map<string, string>();
+  for (const session of apiSessions) {
+    if (session.parent_session_id) v3.set(session.session_id, session.parent_session_id);
+  }
+  return (id) => v3.get(id) ?? cloudParents.get(id);
 }
 
 // F1: PR URLs that appeared on a session between two polls. Only sessions

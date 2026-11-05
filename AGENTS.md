@@ -402,7 +402,7 @@ variable that selects it.
 - Poller health: `poll-error` detail carries `op` (`self|list|session` — which v3 call failed). A 401/403 raises one runtime-only `auth` notification per
   outage (like `identity`; opening it goes to Settings) and the rail bell shows `#pollerWarning` while `authError || noUserIdentity`. Window focus while
   in error drops the backoff and polls now (`notifier-focus-poll`).
-- Sub-session PRs: the poller opens a PR of a Devin Cloud sub-session in the sub-session's scope AND its top-level session's (`autoOpenScopes` / `rootSessionId` in `src/core/notifyModel.ts`; parent links come from the Cloud list `cloudSessions().snapshot()` `parentId` - the v3 list has none; a session missing from it is its own root). Scopes themselves are unchanged - each session keeps its own tab strip.
+- Sub-session PRs: the poller opens a PR of a Devin Cloud sub-session in the sub-session's scope AND every ancestor's up to the top-level session (`autoOpenScopes` in `src/core/notifyModel.ts`, nearest first, cycle-safe). Parent links come from `mergedParentOf`: the v3 session's `parent_session_id` (`normalizeSession` strips `devin-`; covers any depth) first, then the Cloud list `cloudSessions().snapshot()` `parentId` — which only lists top-level sessions and their DIRECT children (`childrenDirect`), so a grandchild is never in it; a session with neither link is its own root. Scopes themselves are unchanged - each session keeps its own tab strip.
 - PR auto-open catch-up: `src/main/prLedger.ts` persists `userData/pr-ledger.json` (`{version:1,lastGoodAt,seen[]}`, 500 URLs, written on change or
   ≥60 s) from every successful poll; a baseline poll (empty `state.apiSessions` after restart/outage) diffs against the ledger via `catchUpPullRequests`
   (24 h window, max 10, open/null PRs only) instead of opening nothing — `pr-auto-open` detail has `catchUp`, plus a `pr-catch-up` event
@@ -1190,7 +1190,7 @@ Detail keys are ids/counts/durations/booleans only unless stated. Also carried: 
 | `cloud-view-show\|create\|rekey\|duplicate\|discard\|discard-cancelled\|crashed` | kinds/counts/ids only, plus `provider` (the pool's providerId); `discard` `reason` = `idle\|cap\|switch\|removed` (`removed` = the view of a deleted OpenHands conversation, `ViewPool.remove`). |
 | `pr-read` / `pr-dismiss` | `{ all, count }`. |
 | `prs-panel` / `prs-save-error` | PR panel open/close, store write failure. |
-| `pr-auto-open` | `detail.source` = `local-chat\|local-terminal\|claude-chat\|claude-terminal\|claude-hook\|openhands-poll` or the poller; `catchUp` for ledger catch-up.; poller records add `rootSessionId` when the PR's session is a Devin Cloud sub-session (the tab was also opened in that top-level session's scope). |
+| `pr-auto-open` | `detail.source` = `local-chat\|local-terminal\|claude-chat\|claude-terminal\|claude-hook\|openhands-poll` or the poller; `catchUp` for ledger catch-up.; poller records add `rootSessionId` + `scopeCount` when the PR's session is a Devin Cloud sub-session (the tab was also opened in each ancestor's scope up to that top-level session; `scopeCount` includes the session itself). |
 | `pr-catch-up` | `{ count, lastGoodAgeMs }`. |
 | `pr-open` | PR opened from the panel. |
 | `pr-title` | never the title text; `state`, `{via:'page'\|'gh'}`. |

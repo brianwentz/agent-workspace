@@ -45,6 +45,7 @@ export interface FixtureSession {
   created_at?: string | number;
   updated_at?: number;
   user_id?: string | null;
+  parent_session_id?: string | null;
   pull_requests?: Array<{ pr_url: string; pr_state: string | null }>;
 }
 
@@ -170,6 +171,7 @@ function createFixtureApi(): { api: FixtureApi; handle: (request: IncomingMessag
       updated_at: session.updated_at ?? 1,
       acus_consumed: 0,
       user_id: effective(session),
+      parent_session_id: session.parent_session_id ?? null,
       pull_requests: session.pull_requests ?? [],
     });
     const single = /^\/v3\/organizations\/[^/]+\/sessions\/([^/]+)$/.exec(url.pathname);

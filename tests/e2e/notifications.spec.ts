@@ -813,6 +813,94 @@ test('auto-opens a lazy background tab in the session scope when a session gains
   }
 });
 
+test('a nested sub-session PR (missing from the Cloud list) auto-opens in every ancestor session', async () => {
+  const profile = mkdtempSync(join(tmpdir(), 'agent-workspace-e2e-notify-'));
+  const logFile = join(profile, 'events.jsonl');
+  // The Cloud list only carries top-level sessions and their direct children:
+  // the grandchild is absent, so only the v3 parent_session_id links it.
+  const cloudRow = (id: string, parentId: string | null) => ({
+    id,
+    acpId: `devin-${id}`,
+    title: id,
+    url: `${fixtures.devinUrl}/sessions/${id}`,
+    status: 'running',
+    statusEnum: null,
+    userActionRequired: null,
+    folder: null,
+    parentId,
+    isPinned: false,
+    isUnread: false,
+    isStarred: false,
+    directChildrenCount: 1,
+    hasMoreChildren: false,
+    prs: { open: 0, queued: 0, draft: 0, merged: 0, closed: 0 },
+    isArchived: false,
+    updatedAt: 1759800000000,
+  });
+  const cloudFile = join(profile, 'cloud-sessions.json');
+  writeFileSync(
+    cloudFile,
+    JSON.stringify({
+      sessions: [cloudRow('sess-root', null), cloudRow('sess-mid', 'sess-root')],
+      folders: [],
+      folderTotals: {},
+      nextCursor: null,
+    }),
+  );
+  const app = await launch(profile, logFile, { AGENT_WORKSPACE_TEST_CLOUD_SESSIONS: cloudFile });
+  const h = hooks(app);
+  const events = async (name: string) => (await readEvents(logFile)).filter((e) => e.event === name);
+  const pollOnce = async () => {
+    const before = (await events('poll')).length;
+    await h.pollNow();
+    await expect.poll(async () => (await events('poll')).length).toBeGreaterThan(before);
+  };
+  const v3 = (id: string, parent: string | null, prs: string[]) => ({
+    session_id: id,
+    title: id,
+    status: 'running',
+    status_detail: 'working',
+    updated_at: 3,
+    parent_session_id: parent ? `devin-${parent}` : null,
+    pull_requests: prs.map((pr_url) => ({ pr_url, pr_state: 'open' })),
+  });
+  const pr = `${fixtures.githubUrl}/acme/widgets/pull/31`;
+  try {
+    await expect
+      .poll(async () =>
+        app.evaluate(() => ((globalThis as any).__agentworkspace.cloudState().sessions as unknown[]).length),
+      )
+      .toBe(2);
+    const quiet = [v3('sess-root', null, []), v3('sess-mid', 'sess-root', []), v3('sess-gc', 'sess-mid', [])];
+    fixtures.api.setSessions(quiet);
+    await h.setPat(PAT);
+    await expect.poll(async () => (await state(app)).notifications.lastPollAt).not.toBeNull();
+    await pollOnce();
+
+    // The user works in the middle session while its own sub-session opens a PR.
+    await h.loadDevinUrl(`${fixtures.devinUrl}/sessions/sess-mid`);
+    await expect.poll(async () => (await state(app)).tabs.scope).toBe('sess-mid');
+    fixtures.api.setSessions([quiet[0]!, quiet[1]!, v3('sess-gc', 'sess-mid', [pr])]);
+    await pollOnce();
+    await waitForEvent(logFile, 'pr-auto-open');
+    const opened = await events('pr-auto-open');
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.detail).toMatchObject({ sessionId: 'sess-gc', rootSessionId: 'sess-root', scopeCount: 3 });
+    // Visible on the middle session's strip, where the user is...
+    await expect.poll(async () => (await state(app)).tabs.tabs.map((tab) => tab.url)).toEqual([pr]);
+    // ...and in the grandchild's and the top-level session's scopes.
+    expect(await h.listScopes()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ scope: 'sess-gc', count: 1 }),
+        expect.objectContaining({ scope: 'sess-mid', count: 1 }),
+        expect.objectContaining({ scope: 'sess-root', count: 1 }),
+      ]),
+    );
+  } finally {
+    await quit(app, profile);
+  }
+});
+
 test('a sub-session PR auto-opens in the sub-session and in its top-level session', async () => {
   const profile = mkdtempSync(join(tmpdir(), 'agent-workspace-e2e-notify-'));
   const logFile = join(profile, 'events.jsonl');

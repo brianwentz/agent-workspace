@@ -184,10 +184,18 @@ describe('normalizeSession', () => {
       url: 'https://app.devin.ai/sessions/s1',
       user_id: null,
       service_user_id: null,
+      parent_session_id: null,
       pull_requests: [{ pr_url: 'https://github.com/o/r/pull/1', pr_state: 'open' }],
     });
     expect(normalizeSession({ status: 'running' })).toBeNull();
     expect(normalizeSession('nope')).toBeNull();
+  });
+
+  it('keeps parent_session_id as a bare id (sub-session parent link)', () => {
+    expect(normalizeSession(session('s3', { parent_session_id: 'devin-abc123' }))?.parent_session_id).toBe('abc123');
+    expect(normalizeSession(session('s4', { parent_session_id: 'abc123' }))?.parent_session_id).toBe('abc123');
+    expect(normalizeSession(session('s5', { parent_session_id: '' }))?.parent_session_id).toBeNull();
+    expect(normalizeSession(session('s6', { parent_session_id: 7 }))?.parent_session_id).toBeNull();
   });
 
   it('keeps user_id when present', () => {
