@@ -535,10 +535,18 @@ export class TerminalHost {
       ];
       let spawnFile = command.file;
       let spawnCwd: string = normalized;
+      const extraEnv = options.kind === 'claude' ? (options.extraEnv ?? {}) : {};
+      // The claude CLI (2.1+) otherwise renders full-screen in the alternate
+      // buffer with mouse tracking, where xterm keeps no scrollback: no
+      // scrollbar, no wheel scroll through history. Stay in the normal buffer.
+      const claudeEnv: Record<string, string> =
+        options.kind === 'claude' && !devinReview
+          ? { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1', ...extraEnv }
+          : extraEnv;
       let spawnEnv: Record<string, string | undefined> = {
         // A devin review keeps devin's WT_SESSION/TERM_PROGRAM handling.
         ...this.ptyEnv(devinReview ? 'devin' : options.kind),
-        ...(options.kind === 'claude' ? options.extraEnv : {}),
+        ...claudeEnv,
       };
       if (wslExec) {
         // Wrap in `wsl.exe -d D --cd <linux cwd> -e <shell> -ilc 'exec …'` so
@@ -549,7 +557,9 @@ export class TerminalHost {
           args,
           // devin's normalized is the UNC workspace — convert to host form.
           cwd: options.kind === 'devin' ? hosts().hostPath(execHost, normalized) : normalized,
-          env: options.kind === 'claude' ? (options.extraEnv ?? {}) : {},
+          // ssh stages env through a ready helper channel; don't make an
+          // otherwise env-free ssh pty depend on one just for this flag.
+          env: isSshHost(execHost) && Object.keys(extraEnv).length === 0 ? {} : claudeEnv,
         });
         spawnFile = spec.file;
         args = spec.args;
